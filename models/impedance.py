@@ -79,8 +79,3 @@ def pressure_uniformity_objective(P_prod_vec, mode="variance"):
         return float(np.max(P_prod_vec) - np.min(P_prod_vec))
     else:
         raise ValueError("mode must be 'variance' or 'range'")
-
-
-        J += penalty_weight * penalty
-
-    return float(J)

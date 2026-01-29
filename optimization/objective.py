@@ -1,7 +1,11 @@
 import importlib
 import sys
 import types
+import os
 import numpy as np
+
+# Add parent directory to path for proper imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Geometry utilities:
 # - generate_center_ring_pattern: create injector/producer coordinates for a center + ring layout
@@ -9,18 +13,8 @@ import numpy as np
 # - minimum_spacing: minimum inter-well distance for constraint checking
 from geometry import generate_center_ring_pattern, distance_matrix, minimum_spacing
 
-# Try to import the impedance model in the "normal" project layout.
-# If the module structure differs (e.g., running from a notebook), patch a minimal
-# module namespace so that impedance.py can still import patterns.geometry.distance_matrix.
-try:
-    from impedance import impedance_doublet
-except ModuleNotFoundError:
-    patterns = types.ModuleType("patterns")
-    geometry_mod = types.ModuleType("patterns.geometry")
-    geometry_mod.distance_matrix = distance_matrix
-    sys.modules["patterns"] = patterns
-    sys.modules["patterns.geometry"] = geometry_mod
-    from impedance import impedance_doublet
+# Import the impedance model from models module
+from models.impedance import impedance_doublet
 
 
 # =========================
@@ -79,12 +73,12 @@ def _import_thermal_function():
     """
     Returns a function CALC_THERMAL(m_dot, V_bulk, ...) -> (P_avg, lifetime_years)
 
-    Preferred: thermal.calculate_thermal_power_and_lifetime
+    Preferred: models.thermal.calculate_thermal_power_and_lifetime
     Fallback: lumped-capacity / equivalent-volume model (no conduction),
               producing a hyperbolic temperature decline and cutoff-based lifetime.
     """
     try:
-        mod = importlib.import_module("thermal")
+        mod = importlib.import_module("models.thermal")
         return mod.calculate_thermal_power_and_lifetime
     except Exception:
         # Fallback: fast analytical approximation
