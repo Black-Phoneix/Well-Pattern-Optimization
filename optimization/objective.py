@@ -1,17 +1,11 @@
 import importlib
-import sys
-import types
-import os
 import numpy as np
 
-# Add parent directory to path for proper imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Geometry utilities:
+# Geometry utilities from patterns.geometry:
 # - generate_center_ring_pattern: create injector/producer coordinates for a center + ring layout
 # - distance_matrix: pairwise distances between two well sets
 # - minimum_spacing: minimum inter-well distance for constraint checking
-from geometry import generate_center_ring_pattern, distance_matrix, minimum_spacing
+from patterns.geometry import generate_center_ring_pattern, distance_matrix, minimum_spacing
 
 # Import the impedance model from models module
 from models.impedance import impedance_doublet
