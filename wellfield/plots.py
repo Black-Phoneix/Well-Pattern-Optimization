@@ -257,12 +257,16 @@ def plot_streamlines(
     # Velocity magnitude
     speed = np.sqrt(qx**2 + qy**2)
     
-    # Plot streamlines
-    strm = ax.streamplot(X, Y, qx, qy, color=np.log10(speed + 1e-15), cmap='viridis',
+    # Plot streamlines with color based on log speed
+    log_speed = np.log10(speed + 1e-15)
+    strm = ax.streamplot(X, Y, qx, qy, color=log_speed, cmap='viridis',
                          density=density, linewidth=1.0, arrowsize=1.2)
     
-    # Colorbar for velocity
-    cbar = plt.colorbar(strm.lines, ax=ax, label='log₁₀(|q|) [m/s]', pad=0.02)
+    # Colorbar for velocity using a ScalarMappable
+    norm = Normalize(vmin=np.nanmin(log_speed), vmax=np.nanmax(log_speed))
+    sm = cm.ScalarMappable(cmap='viridis', norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, label='log10(|q|) [m/s]', pad=0.02)
     
     # Plot seed circles around injectors
     r_seed = config.r_seed

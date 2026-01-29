@@ -284,15 +284,15 @@ def print_solution_summary(
     print(f"  CV_inj     = {metrics['CV_inj']:.4f}")
     print(f"  CV_prod    = {metrics['CV_prod']:.4f}")
     print(f"  CV_tof     = {metrics['CV_tof']:.4f}")
-    print(f"  τ_years    = {metrics['tau_years']:.1f} years")
+    print(f"  tau_years  = {metrics['tau_years']:.1f} years")
     print(f"  Penalty    = {metrics['penalty']:.2e}")
     
     if 'thermal_Q_dot_MW' in metrics:
         print("\n--- Thermal Metrics ---")
-        print(f"  V_res      = {metrics['thermal_V_res']/1e9:.2f} × 10⁹ m³")
+        print(f"  V_res      = {metrics['thermal_V_res']/1e9:.2f} x 10^9 m^3")
         print(f"  Q_res      = {metrics['thermal_Q_res_GJ']:.1f} GJ")
-        print(f"  Q̇_CO2     = {metrics['thermal_Q_dot_MW']:.2f} MW")
-        print(f"  τ          = {metrics['tau_years']:.1f} years")
+        print(f"  Q_dot_CO2  = {metrics['thermal_Q_dot_MW']:.2f} MW")
+        print(f"  tau        = {metrics['tau_years']:.1f} years")
     
     print("\n--- Pressure Drops (MPa) ---")
     print("  Injectors:  ", end="")

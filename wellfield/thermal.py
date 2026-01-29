@@ -5,20 +5,20 @@ Uses a conical frustum reservoir volume model tied to geometry (R_in, R_out).
 
 Key equations:
     Reservoir volume:
-        V_res = (1/3) π H (R_out² + R_out*R_in + R_in²)
+        V_res = (1/3) * pi * H * (R_out^2 + R_out*R_in + R_in^2)
     
     Mass of rock + residual water:
-        m_rock = V_res * (1-φ) * ρ_rock
-        m_wat = V_res * φ * ρ_wat * S_wirr
+        m_rock = V_res * (1 - phi) * rho_rock
+        m_wat = V_res * phi * rho_wat * S_wirr
     
     Total available sensible heat:
-        Q_res = (m_rock * c_p,rock + m_wat * c_p,wat) * (T_res - T_working)
+        Q_res = (m_rock * cp_rock + m_wat * cp_wat) * (T_res - T_working)
     
     Heat extraction rate:
-        Q̇_CO2 = ṁ_total * c_p,CO2 * (T_prod - T_inj)
+        Q_dot_CO2 = m_dot_total * cp_CO2 * (T_prod - T_inj)
     
     Lifetime:
-        τ_years = Q_res / (Q̇_CO2 * 3600 * 24 * 365)
+        tau_years = Q_res / (Q_dot_CO2 * 3600 * 24 * 365)
 """
 
 from typing import Dict, Optional, Tuple
@@ -146,9 +146,9 @@ def compute_heat_extraction_rate(config: Optional[Config] = None) -> float:
     Compute heat extraction rate from circulating CO2.
     
     Equation:
-        Q̇_CO2 = ṁ_total * c_p,CO2 * (T_prod - T_inj)
+        Q_dot_CO2 = m_dot_total * cp_CO2 * (T_prod - T_inj)
     
-    Uses CoolProp for c_p,CO2 at mean conditions.
+    Uses CoolProp for cp_CO2 at mean conditions.
     
     Parameters
     ----------

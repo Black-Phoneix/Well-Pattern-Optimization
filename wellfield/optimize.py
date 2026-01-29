@@ -245,18 +245,12 @@ def run_parameter_study(
         if verbose:
             print(f"\nParameter study {i+1}/{len(param_values)}: {param_name} = {val}")
         
-        # Create modified config
-        config_dict = {
-            'M_DOT_TOTAL': base_config.M_DOT_TOTAL,
-            'K_PERM': base_config.K_PERM,
-            'H_THICK': base_config.H_THICK,
-            'W1': base_config.W1,
-            'W2': base_config.W2,
-            'W3': base_config.W3,
-            'W4': base_config.W4,
-            'DE_MAXITER': 50,  # Faster for parameter study
-        }
+        # Create modified config by copying all parameters from base_config
+        import dataclasses
+        config_dict = {f.name: getattr(base_config, f.name) 
+                       for f in dataclasses.fields(base_config)}
         config_dict[param_name] = val
+        config_dict['DE_MAXITER'] = 50  # Faster for parameter study
         
         config = Config(**config_dict)
         
