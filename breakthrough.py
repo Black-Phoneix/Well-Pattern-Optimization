@@ -71,7 +71,7 @@ def compute_tof(
             x0 = inj.x + r_seed * np.cos(ang)
             y0 = inj.y + r_seed * np.sin(ang)
 
-            def hit_producer(_, state):
+            def hit_producer(_, state, *_args):
                 dx = np.array([state[0] - p.x for p in producers])
                 dy = np.array([state[1] - p.y for p in producers])
                 return np.min(np.hypot(dx, dy)) - r_capture
