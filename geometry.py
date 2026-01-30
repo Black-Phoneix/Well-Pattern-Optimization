@@ -1,60 +1,86 @@
-import numpy as np
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
+
+import numpy as np
 
 
-@dataclass
+@dataclass(frozen=True)
 class Well:
     """
-    Simple representation of a well in 2D map view.
+    2D map-view well definition.
 
     Attributes
     ----------
     x, y : float
-        Coordinates in [m].
+        Coordinates [m].
     kind : str
         "injector" or "producer".
+    label : str
+        Well label (P0, I1.., P1..).
     """
+
     x: float
     y: float
-    kind: str  # "injector" or "producer"
+    kind: str
+    label: str
 
 
-def generate_ring_pattern(
-    n_inj: int,
-    n_prod: int,
-    R_inj: float,
-    R_prod: float,
-    phi_inj0: float = 0.0,
-    phi_prod0: float = 0.0,
+def outer_producer_angles(theta0: float, eps: Iterable[float]) -> np.ndarray:
+    """
+    Compute outer producer angles from (theta0, eps1..eps3).
+
+    θP1 = θ0
+    θP2 = θ0 + (π/2 + ε1)
+    θP3 = θP2 + (π/2 + ε2)
+    θP4 = θP3 + (π/2 + ε3)
+    ε4 = -(ε1+ε2+ε3) enforces closure
+    """
+
+    eps = np.asarray(list(eps), dtype=float)
+    if eps.size != 3:
+        raise ValueError("eps must have length 3 (ε1, ε2, ε3).")
+    inc = np.array([np.pi / 2.0 + eps[0], np.pi / 2.0 + eps[1], np.pi / 2.0 + eps[2]])
+    theta = np.zeros(4, dtype=float)
+    theta[0] = theta0
+    theta[1] = theta[0] + inc[0]
+    theta[2] = theta[1] + inc[1]
+    theta[3] = theta[2] + inc[2]
+    return theta
+
+
+def generate_wells(
+    r_in: float,
+    r_out: float,
+    theta0: float,
+    eps: Iterable[float],
 ) -> Tuple[List[Well], List[Well]]:
     """
-    Generate a simple ring pattern:
-    - n_inj injectors on a circle of radius R_inj
-    - n_prod producers on a circle of radius R_prod
+    Generate the 1 center producer + 3 injectors + 4 outer producers layout.
 
-    Angles are measured in radians, starting from phi_inj0 / phi_prod0.
-
-    Returns
-    -------
-    injectors, producers : list[Well], list[Well]
+    Injectors are fixed at 0, 2π/3, 4π/3 on the inner ring.
     """
-    injectors: List[Well] = []
-    producers: List[Well] = []
 
-    # injectors
-    for i in range(n_inj):
-        phi = phi_inj0 + 2.0 * np.pi * i / n_inj
-        x = R_inj * np.cos(phi)
-        y = R_inj * np.sin(phi)
-        injectors.append(Well(x=x, y=y, kind="injector"))
+    injectors = []
+    producers = []
 
-    # producers
-    for j in range(n_prod):
-        phi = phi_prod0 + 2.0 * np.pi * j / n_prod
-        x = R_prod * np.cos(phi)
-        y = R_prod * np.sin(phi)
-        producers.append(Well(x=x, y=y, kind="producer"))
+    # Center producer P0
+    producers.append(Well(0.0, 0.0, "producer", "P0"))
+
+    # Injectors on inner ring (fixed angles)
+    inj_angles = np.array([0.0, 2.0 * np.pi / 3.0, 4.0 * np.pi / 3.0])
+    for i, ang in enumerate(inj_angles, start=1):
+        x = r_in * np.cos(ang)
+        y = r_in * np.sin(ang)
+        injectors.append(Well(x, y, "injector", f"I{i}"))
+
+    # Outer producers with variable angles
+    angles = outer_producer_angles(theta0, eps)
+    for i, ang in enumerate(angles, start=1):
+        x = r_out * np.cos(ang)
+        y = r_out * np.sin(ang)
+        producers.append(Well(x, y, "producer", f"P{i}"))
 
     return injectors, producers
 
@@ -65,76 +91,52 @@ def distance_matrix(injectors: List[Well], producers: List[Well]) -> np.ndarray:
 
     D[j, i] = distance between producer j and injector i
     """
+
     n_inj = len(injectors)
     n_prod = len(producers)
-    D = np.zeros((n_prod, n_inj), dtype=float)
-
-    for j, p in enumerate(producers):
+    dmat = np.zeros((n_prod, n_inj), dtype=float)
+    for j, prod in enumerate(producers):
         for i, inj in enumerate(injectors):
-            dx = p.x - inj.x
-            dy = p.y - inj.y
-            D[j, i] = np.hypot(dx, dy)
-
-    return D
+            dmat[j, i] = np.hypot(prod.x - inj.x, prod.y - inj.y)
+    return dmat
 
 
 def minimum_spacing(wells: List[Well]) -> float:
-    """
-    Compute the minimum pairwise distance between all wells.
+    """Return the minimum pairwise distance between wells."""
 
-    Useful for checking spacing constraints.
-    """
-    coords = np.array([[w.x, w.y] for w in wells])
-    n = len(coords)
+    coords = np.array([[w.x, w.y] for w in wells], dtype=float)
     d_min = np.inf
+    for i in range(len(coords)):
+        for j in range(i + 1, len(coords)):
+            d_min = min(d_min, np.linalg.norm(coords[i] - coords[j]))
+    return float(d_min)
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = np.linalg.norm(coords[i] - coords[j])
-            if d < d_min:
-                d_min = d
 
-    return d_min
-
-# ... (保留原有的 Well 类和 imports)
-
-def generate_center_ring_pattern(
-    n_inj: int,
-    n_prod_outer: int,
-    R_inj: float,
-    R_prod: float,
-    phi_inj0: float = 0.0,
-    phi_prod0: float = 0.0,
-    center_producer: bool = True
-) -> Tuple[List[Well], List[Well]]:
+def geometry_violations(
+    r_in: float,
+    r_out: float,
+    eps: Iterable[float],
+    s_min: float,
+    delta_r_min: float,
+    delta_theta_min: float,
+    wells: List[Well],
+) -> dict:
     """
-    生成 '中心 + 环形' 混合井网模式:
-    - n_inj 个注入井分布在半径 R_inj 的圆上
-    - 1 个生产井位于中心 (0,0) (可选)
-    - n_prod_outer 个生产井分布在半径 R_prod 的圆上
-    
-    这种布局允许通过调整 R_inj 和 R_prod 的比例，来平衡中心井与外围井的阻抗。
+    Compute constraint violations for geometry.
+
+    Returns a dictionary of nonnegative violation magnitudes.
     """
-    injectors: List[Well] = []
-    producers: List[Well] = []
 
-    # 1. 生成注入井 (Injectors)
-    for i in range(n_inj):
-        phi = phi_inj0 + 2.0 * np.pi * i / n_inj
-        x = R_inj * np.cos(phi)
-        y = R_inj * np.sin(phi)
-        injectors.append(Well(x=x, y=y, kind="injector"))
+    eps = np.asarray(list(eps), dtype=float)
+    eps4 = -(eps[0] + eps[1] + eps[2])
+    increments = np.array(
+        [np.pi / 2.0 + eps[0], np.pi / 2.0 + eps[1], np.pi / 2.0 + eps[2], np.pi / 2.0 + eps4]
+    )
 
-    # 2. 生成中心生产井 (Center Producer)
-    if center_producer:
-        # 中心井坐标固定为 (0,0)
-        producers.append(Well(x=0.0, y=0.0, kind="producer"))
-
-    # 3. 生成外围生产井环 (Outer Ring Producers)
-    for j in range(n_prod_outer):
-        phi = phi_prod0 + 2.0 * np.pi * j / n_prod_outer
-        x = R_prod * np.cos(phi)
-        y = R_prod * np.sin(phi)
-        producers.append(Well(x=x, y=y, kind="producer"))
-
-    return injectors, producers
+    angle_violation = float(np.sum(np.maximum(0.0, delta_theta_min - increments)))
+    violations = {
+        "min_spacing": max(0.0, s_min - minimum_spacing(wells)),
+        "radial_gap": max(0.0, delta_r_min - (r_out - r_in)),
+        "angle_increments": angle_violation,
+    }
+    return violations
