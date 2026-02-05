@@ -20,7 +20,7 @@ Unit Conventions:
 - Well radius: m
 """
 
-from typing import Tuple, Union, List
+from typing import Dict, Tuple, Union, List
 import numpy as np
 
 # Import existing modules for reuse
@@ -268,6 +268,106 @@ def solve_producer_bhp_equal_rate(
     q_inj = np.sum(q_ij, axis=0)  # Shape: (n_inj,)
 
     return P_prod, q_ij, q_inj
+
+
+def pressure_drop_variance(P_inj: float, P_prod: np.ndarray) -> float:
+    """Return variance of producer pressure drop ``P_inj - P_prod`` in Pa²."""
+    dP = P_inj - np.asarray(P_prod)
+    return float(np.var(dP))
+
+
+def _min_circular_separation_deg(angles_rad: np.ndarray) -> float:
+    """Return minimum pairwise angular separation on a circle in degrees."""
+    wrapped = np.mod(np.asarray(angles_rad), 2.0 * np.pi)
+    wrapped.sort()
+    gaps = np.diff(np.concatenate([wrapped, wrapped[:1] + 2.0 * np.pi]))
+    return float(np.min(gaps) * 180.0 / np.pi)
+
+
+def optimize_outer_producer_ring(
+    inj_xy: np.ndarray,
+    P_inj: float,
+    q_prod: float,
+    params: dict,
+    R_inj: float,
+    R_prod_bounds: Tuple[float, float],
+    n_outer: int = 4,
+    n_radius_samples: int = 60,
+    n_angle_trials: int = 4000,
+    min_angle_deg: float = 10.0,
+    random_seed: int = 42,
+) -> Dict[str, np.ndarray]:
+    """
+    Optimize outer producer coordinates for minimum pressure-drop variance.
+
+    The optimization assumes:
+    - 1 center producer fixed at (0, 0)
+    - ``n_outer`` producers on one ring with shared radius ``R_prod``
+    - each outer producer angle is independently optimized
+
+    Constraints:
+    - shared outer radius ``R_prod``
+    - minimum circular angular separation >= ``min_angle_deg``
+
+    Objective:
+        minimize var(P_inj - P_prod[i])
+
+    where ``P_prod`` is computed from superposition of all injector-to-producer
+    conductances ``sum_j (1/Z_ij)`` under equal-rate constraints.
+    """
+    r_min, r_max = R_prod_bounds
+    if r_min <= R_inj:
+        raise ValueError('R_prod_bounds[0] must be greater than R_inj.')
+    if r_max <= r_min:
+        raise ValueError('R_prod_bounds must satisfy r_max > r_min.')
+    if min_angle_deg <= 0.0:
+        raise ValueError('min_angle_deg must be positive.')
+    if n_outer * min_angle_deg >= 360.0:
+        raise ValueError('min_angle_deg is too large for the number of outer producers.')
+
+    radii = np.linspace(r_min, r_max, n_radius_samples)
+    rng = np.random.default_rng(random_seed)
+
+    # Candidate angle sets: include baseline equally spaced set + random independent sets
+    angle_candidates = [np.arange(n_outer) * (2.0 * np.pi / n_outer)]
+    max_attempts = max(50 * n_angle_trials, 2000)
+    attempts = 0
+    while len(angle_candidates) < n_angle_trials + 1 and attempts < max_attempts:
+        attempts += 1
+        angles = np.sort(rng.uniform(0.0, 2.0 * np.pi, size=n_outer))
+        if _min_circular_separation_deg(angles) >= min_angle_deg:
+            angle_candidates.append(angles)
+
+    if len(angle_candidates) < 2:
+        raise ValueError('Failed to generate valid outer producer angles under min_angle_deg constraint.')
+
+    best = None
+    for R_prod in radii:
+        for angles in angle_candidates:
+            prod_xy = np.vstack([
+                np.array([[0.0, 0.0]]),
+                np.column_stack((R_prod * np.cos(angles), R_prod * np.sin(angles))),
+            ])
+
+            Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
+            P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
+            var_dp = pressure_drop_variance(P_inj, P_prod)
+
+            if best is None or var_dp < best['variance_dP']:
+                best = {
+                    'prod_xy': prod_xy,
+                    'P_prod': P_prod,
+                    'q_ij': q_ij,
+                    'q_inj': q_inj,
+                    'Z': Z,
+                    'R_prod': np.array(R_prod),
+                    'outer_angles_rad': np.array(angles),
+                    'outer_angles_deg': np.array(angles * 180.0 / np.pi),
+                    'min_angle_deg_achieved': np.array(_min_circular_separation_deg(angles)),
+                    'variance_dP': np.array(var_dp),
+                }
+
+    return best
 
 
 def validate_solution(

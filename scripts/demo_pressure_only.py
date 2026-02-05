@@ -17,23 +17,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 
-from patterns.geometry import (
-    Well,
-    generate_center_ring_pattern,
-    distance_matrix as geometry_distance_matrix,
-)
+from patterns.geometry import Well
 from models.pressure_only import (
-    compute_pairwise_impedance,
-    solve_producer_bhp_equal_rate,
     validate_solution,
     validate_total_mass_balance,
     solve_pressure_allocation,
+    optimize_outer_producer_ring,
 )
 
 
 def create_3inj_5prod_layout(
-    R_inj: float = 600.0,
-    R_prod: float = 300.0,
+    R_inj: float = 300.0,
+    R_prod: float = 600.0,
     phi_inj0: float = 0.0,
     phi_prod0: float = np.pi / 4,  # Offset for non-symmetric geometry
     asymmetric: bool = True,
@@ -46,12 +41,14 @@ def create_3inj_5prod_layout(
     - 4 producers on a ring of radius R_prod
     - 3 injectors on a ring of radius R_inj at 120° spacing
 
+    The producer ring radius must be larger than the injector ring radius.
+
     Parameters
     ----------
     R_inj : float
-        Injector ring radius in meters. Default: 600.0 m.
+        Injector ring radius in meters. Default: 300.0 m.
     R_prod : float
-        Producer ring radius in meters. Default: 300.0 m.
+        Producer ring radius in meters. Default: 600.0 m.
     phi_inj0 : float
         Starting angle for injectors in radians. Default: 0.0.
     phi_prod0 : float
@@ -66,15 +63,26 @@ def create_3inj_5prod_layout(
     producers : list[Well]
         List of 5 producer Well objects (1 center + 4 ring).
     """
-    return generate_center_ring_pattern(
-        n_inj=3,
-        n_prod_outer=4,
-        R_inj=R_inj,
-        R_prod=R_prod,
-        phi_inj0=phi_inj0,
-        phi_prod0=phi_prod0 if asymmetric else 0.0,
-        center_producer=True,
+    if R_prod <= R_inj:
+        raise ValueError("Producer ring radius must be larger than injector ring radius.")
+
+    inj_angles = phi_inj0 + np.arange(3) * (2.0 * np.pi / 3.0)
+    injectors = [
+        Well(R_inj * np.cos(theta), R_inj * np.sin(theta), "injector")
+        for theta in inj_angles
+    ]
+
+    prod_angles = phi_prod0 + np.arange(4) * (2.0 * np.pi / 4.0)
+    if not asymmetric:
+        prod_angles = np.arange(4) * (2.0 * np.pi / 4.0)
+
+    producers = [Well(0.0, 0.0, "producer")]
+    producers.extend(
+        Well(R_prod * np.cos(theta), R_prod * np.sin(theta), "producer")
+        for theta in prod_angles
     )
+
+    return injectors, producers
 
 
 def print_well_layout(injectors, producers):
@@ -174,11 +182,12 @@ def main():
 
     # Operating conditions
     P_inj = 30.0e6  # Injector BHP [Pa] (30 MPa)
-    q_prod = 10.0   # Production rate per producer [kg/s]
+    q_total = 126.8 # Total production rate [kg/s]
+    q_prod = q_total / 5.0  # Equal rate per producer [kg/s]
 
     # Geometry parameters
-    R_inj = 600.0   # Injector ring radius [m]
-    R_prod = 300.0  # Producer ring radius [m]
+    R_inj = 300.0   # Injector ring radius [m]
+    R_prod = 600.0  # Producer ring radius [m]
 
     params = {
         'mu': mu,
@@ -197,24 +206,49 @@ def main():
     print(f"  Density:        {rho:.1f} kg/m³")
     print(f"\nOperating Conditions:")
     print(f"  Injector BHP:   {P_inj/1e6:.1f} MPa")
-    print(f"  Producer rate:  {q_prod:.1f} kg/s per producer")
+    print(f"  Total production rate target: {q_total:.1f} kg/s")
+    print(f"  Producer rate (equal split):  {q_prod:.3f} kg/s per producer")
     print(f"\nGeometry:")
     print(f"  Injector radius: {R_inj:.1f} m")
     print(f"  Producer radius: {R_prod:.1f} m")
 
     # =========================================================================
-    # 2. Create well layout (non-symmetric)
+    # 2. Fix injectors, then optimize producer coordinates using superposition
     # =========================================================================
-    print("\n2. WELL LAYOUT (Non-symmetric geometry)")
+    print("\n2. PRESSURE OPTIMIZER (Fixed injectors, optimize producers)")
     print("-" * 70)
 
-    injectors, producers = create_3inj_5prod_layout(
+    injectors, _ = create_3inj_5prod_layout(
         R_inj=R_inj,
         R_prod=R_prod,
-        asymmetric=True,  # Non-symmetric layout
+        asymmetric=True,
+    )
+    inj_xy = np.array([[w.x, w.y] for w in injectors])
+
+    opt = optimize_outer_producer_ring(
+        inj_xy=inj_xy,
+        P_inj=P_inj,
+        q_prod=q_prod,
+        params=params,
+        R_inj=R_inj,
+        R_prod_bounds=(R_inj + 50.0, 1200.0),
+        n_outer=4,
+        n_radius_samples=40,
+        n_angle_trials=3000,
+        min_angle_deg=10.0,
+        random_seed=42,
     )
 
-    print(f"Created {len(injectors)} injectors and {len(producers)} producers")
+    prod_xy = opt['prod_xy']
+    producers = [Well(x, y, 'producer') for x, y in prod_xy]
+
+    print(f"Created {len(injectors)} fixed injectors and optimized {len(producers)} producers")
+    print(f"Optimized outer producer radius: {float(opt['R_prod']):.3f} m")
+    print("Optimized outer producer angles [deg]:")
+    for idx, ang in enumerate(opt['outer_angles_deg'], start=1):
+        print(f"  Outer producer {idx}: {ang:.3f}°")
+    print(f"Minimum angular spacing achieved: {float(opt['min_angle_deg_achieved']):.3f}°")
+    print(f"Pressure-drop variance objective: {float(opt['variance_dP']):.4e} Pa^2")
     print_well_layout(injectors, producers)
 
     # =========================================================================
@@ -226,11 +260,13 @@ def main():
     inj_xy = np.array([[w.x, w.y] for w in injectors])
     prod_xy = np.array([[w.x, w.y] for w in producers])
 
-    Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
+    Z = opt['Z']
 
     print(f"Impedance matrix shape: {Z.shape} (producers × injectors)")
     print("\nImpedance matrix Z [Pa/(kg/s)] (rows=producers, cols=injectors):")
-    print(f"{'Prod\\Inj':<10}" + "".join([f"{'Inj' + str(j):<15}" for j in range(len(injectors))]))
+    header_left = 'Prod\\Inj'
+    header_right = ''.join([f"{'Inj' + str(j):<15}" for j in range(len(injectors))])
+    print(f"{header_left:<10}" + header_right)
     print("-" * (10 + 15 * len(injectors)))
     for i in range(len(producers)):
         row = f"{'Prod' + str(i):<10}"
@@ -244,7 +280,7 @@ def main():
     print("\n4. SOLVE PRESSURE ALLOCATION")
     print("-" * 70)
 
-    P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
+    P_prod, q_ij, q_inj = opt['P_prod'], opt['q_ij'], opt['q_inj']
 
     print_results(P_prod, q_ij, q_inj, producers, injectors, P_inj, q_prod)
 
@@ -307,7 +343,7 @@ def main():
     print(f"  - Producer BHP range: {np.min(P_prod)/1e6:.4f} - {np.max(P_prod)/1e6:.4f} MPa")
     print(f"  - Pressure uniformity CV: {np.std(P_prod)/np.mean(P_prod)*100:.2f}%")
     print(f"  - Total injection: {np.sum(q_inj):.2f} kg/s")
-    print(f"  - Total production: {q_prod * len(producers):.2f} kg/s")
+    print(f"  - Total production: {q_total:.2f} kg/s")
     print("\n✓ Demo completed successfully!")
     print("=" * 70)
 
