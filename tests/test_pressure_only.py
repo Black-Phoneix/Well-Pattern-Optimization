@@ -26,6 +26,8 @@ from models.pressure_only import (
     solve_pressure_allocation,
     optimize_outer_producer_ring,
     pressure_drop_variance,
+    solve_producer_bhp_variable_rate,
+    optimize_producer_layout_priority,
 )
 from patterns.geometry import (
     Well,
@@ -474,3 +476,46 @@ class TestProducerCoordinateOptimization:
         for i in range(5):
             assert np.isclose(np.sum(opt['q_ij'][i, :]), q_prod, rtol=1e-10)
         assert np.isclose(np.sum(opt['q_inj']), q_total, rtol=1e-10)
+
+
+class TestPriorityLayoutOptimizer:
+    """Tests for pressure-first, variable-rate producer layout optimizer."""
+
+    def test_priority_optimizer_pressure_first(self):
+        injectors, _ = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+
+        result = optimize_producer_layout_priority(
+            inj_xy=inj_xy,
+            P_inj=30e6,
+            q_total=126.8,
+            params=params,
+            R_inj=300.0,
+            outer_radius_bounds=(350.0, 1100.0),
+            center_radius_max=270.0,
+            n_trials=3000,
+            pressure_tolerance_ratio=0.05,
+            random_seed=11,
+        )
+
+        assert result['prod_xy'].shape == (5, 2)
+        assert result['q_prod_vec'].shape == (5,)
+        assert np.isclose(np.sum(result['q_prod_vec']), 126.8, rtol=1e-10)
+        assert float(result['pressure_uniformity_ratio']) <= 0.05
+
+        # Outer producers must be outside injector ring
+        center_xy = np.mean(inj_xy, axis=0)
+        outer_r = np.linalg.norm(result['prod_xy'][1:] - center_xy, axis=1)
+        assert np.all(outer_r > 300.0)
+
+        # Balance checks
+        for i in range(5):
+            assert np.isclose(np.sum(result['q_ij'][i, :]), result['q_prod_vec'][i], rtol=1e-10)

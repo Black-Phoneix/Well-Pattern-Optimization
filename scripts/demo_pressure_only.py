@@ -21,7 +21,9 @@ from patterns.geometry import Well
 from models.pressure_only import (
     validate_solution,
     validate_total_mass_balance,
+    validate_solution_variable_rate,
     solve_pressure_allocation,
+    optimize_producer_layout_priority,
     optimize_outer_producer_ring,
 )
 
@@ -102,6 +104,53 @@ def print_well_layout(injectors, producers):
     print("-" * 38)
     for i, w in enumerate(producers):
         print(f"{i:<8}{w.x:<15.2f}{w.y:<15.2f}")
+
+
+def plot_well_layout(injectors, producers, R_inj: float, R_prod: float, output_path: str = "scripts/pressure_only_layout.png"):
+    """Plot well coordinates with injector/producer rings and save to file."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("⚠ matplotlib not available, skipping coordinate plot.")
+        return None
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    # Draw rings centered at origin
+    inj_circle = plt.Circle((0.0, 0.0), R_inj, color='tab:blue', fill=False, linestyle='--', linewidth=1.5, label='Injector ring')
+    prod_circle = plt.Circle((0.0, 0.0), R_prod, color='tab:red', fill=False, linestyle='--', linewidth=1.5, label='Producer ring')
+    ax.add_patch(inj_circle)
+    ax.add_patch(prod_circle)
+
+    inj_xy = np.array([[w.x, w.y] for w in injectors])
+    prod_xy = np.array([[w.x, w.y] for w in producers])
+
+    # Injectors: blue triangles
+    ax.scatter(inj_xy[:, 0], inj_xy[:, 1], marker='^', c='tab:blue', s=90, label='Injection wells')
+    # Producers: red circles
+    ax.scatter(prod_xy[:, 0], prod_xy[:, 1], marker='o', c='tab:red', s=70, label='Production wells')
+
+    # Annotate well indices
+    for j, (x, y) in enumerate(inj_xy):
+        ax.text(x + 10, y + 10, f"I{j}", color='tab:blue', fontsize=9)
+    for i, (x, y) in enumerate(prod_xy):
+        ax.text(x + 10, y + 10, f"P{i}", color='tab:red', fontsize=9)
+
+    lim = max(R_prod, R_inj) * 1.25
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect('equal', 'box')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_title('Pressure-only Well Layout (3 Injectors / 5 Producers)')
+    ax.legend(loc='upper right')
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    print(f"Saved coordinate plot: {output_path}")
+    return output_path
 
 
 def print_results(P_prod, q_ij, q_inj, producers, injectors, P_inj, q_prod):
@@ -225,6 +274,20 @@ def main():
     )
     inj_xy = np.array([[w.x, w.y] for w in injectors])
 
+    opt = optimize_producer_layout_priority(
+        inj_xy=inj_xy,
+        P_inj=P_inj,
+        q_total=q_total,
+        params=params,
+        R_inj=R_inj,
+        outer_radius_bounds=(R_inj + 50.0, 1200.0),
+        center_radius_max=0.9 * R_inj,
+        n_trials=20000,
+        pressure_tolerance_ratio=0.05,
+        random_seed=42,
+    )
+    inj_xy = np.array([[w.x, w.y] for w in injectors])
+
     opt = optimize_outer_producer_ring(
         inj_xy=inj_xy,
         P_inj=P_inj,
@@ -242,6 +305,28 @@ def main():
     prod_xy = opt['prod_xy']
     producers = [Well(x, y, 'producer') for x, y in prod_xy]
 
+    prod_xy = opt['prod_xy']
+    producers = [Well(x, y, 'producer') for x, y in prod_xy]
+
+    print(f"Created {len(injectors)} fixed injectors and optimized {len(producers)} producers")
+    print("Pressure-first objective (target <= 5%):")
+    print(f"  pressure uniformity ratio: {float(opt['pressure_uniformity_ratio'])*100:.3f}%")
+    print(f"  tolerance ratio:           {float(opt['pressure_tolerance_ratio'])*100:.3f}%")
+    print("Second-stage uniformity metrics:")
+    print(f"  min(inj-to-outer-prod distance): {float(opt['min_ip_outer']):.3f} m")
+    print(f"  min(prod-to-prod distance):      {float(opt['min_pp']):.3f} m")
+    print(f"  outer angle-gap CV:              {float(opt['gap_cv_outer']):.4f}")
+    print("Outer producer polar coordinates (deg, m):")
+    for idx, (ang, rr) in enumerate(zip(opt['outer_theta_deg'], opt['outer_r']), start=1):
+        print(f"  Outer producer {idx}: angle={float(ang):.3f}°, radius={float(rr):.3f} m")
+
+    q_prod_vec = opt['q_prod_vec']
+    q_prod = float(np.mean(q_prod_vec))
+
+    print("Optimized variable producer flow split [kg/s]:")
+    for i, qi in enumerate(q_prod_vec):
+        print(f"  Producer {i}: {float(qi):.4f}")
+
     print(f"Created {len(injectors)} fixed injectors and optimized {len(producers)} producers")
     print(f"Optimized outer producer radius: {float(opt['R_prod']):.3f} m")
     print("Optimized outer producer angles [deg]:")
@@ -250,6 +335,7 @@ def main():
     print(f"Minimum angular spacing achieved: {float(opt['min_angle_deg_achieved']):.3f}°")
     print(f"Pressure-drop variance objective: {float(opt['variance_dP']):.4e} Pa^2")
     print_well_layout(injectors, producers)
+    plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(np.max(opt['outer_r'])))
 
     # =========================================================================
     # 3. Compute impedance matrix
@@ -291,10 +377,10 @@ def main():
     print("-" * 70)
 
     try:
-        validate_solution(q_ij, q_prod, tol=1e-6)
-        print("✓ Producer mass balance: PASSED")
+        validate_solution_variable_rate(q_ij, q_prod_vec, tol=1e-6)
+        print("✓ Producer mass balance (variable rates): PASSED")
     except ValueError as e:
-        print(f"✗ Producer mass balance: FAILED - {e}")
+        print(f"✗ Producer mass balance (variable rates): FAILED - {e}")
 
     try:
         validate_total_mass_balance(q_inj, q_prod, len(producers), tol=1e-6)
@@ -323,11 +409,9 @@ def main():
         validate=True,
     )
 
-    print("Using solve_pressure_allocation() convenience function...")
+    print("Using solve_pressure_allocation() convenience function (equal-rate reference)...")
     print(f"  Returned keys: {list(result.keys())}")
-    print(f"  P_prod matches: {np.allclose(result['P_prod'], P_prod)}")
-    print(f"  q_ij matches:   {np.allclose(result['q_ij'], q_ij)}")
-    print(f"  q_inj matches:  {np.allclose(result['q_inj'], q_inj)}")
+    print("  Note: reference API enforces equal producer rates; optimizer uses variable producer rates.")
 
     # =========================================================================
     # 7. Summary
@@ -338,7 +422,7 @@ def main():
     print(f"Configuration: {len(injectors)} injectors, {len(producers)} producers")
     print(f"Boundary conditions:")
     print(f"  - Injector BHP (Dirichlet): {P_inj/1e6:.1f} MPa (fixed)")
-    print(f"  - Producer rate (Neumann):  {q_prod:.1f} kg/s per producer (fixed)")
+    print(f"  - Producer rates (Neumann): variable, mean {np.mean(q_prod_vec):.2f} kg/s")
     print(f"\nKey results:")
     print(f"  - Producer BHP range: {np.min(P_prod)/1e6:.4f} - {np.max(P_prod)/1e6:.4f} MPa")
     print(f"  - Pressure uniformity CV: {np.std(P_prod)/np.mean(P_prod)*100:.2f}%")
