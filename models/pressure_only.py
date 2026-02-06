@@ -20,7 +20,7 @@ Unit Conventions:
 - Well radius: m
 """
 
-from typing import Tuple, Union, List
+from typing import Dict, Tuple, Union, List
 import numpy as np
 
 # Import existing modules for reuse
@@ -270,6 +270,272 @@ def solve_producer_bhp_equal_rate(
     return P_prod, q_ij, q_inj
 
 
+def pressure_drop_variance(P_inj: float, P_prod: np.ndarray) -> float:
+    """Return variance of producer pressure drop ``P_inj - P_prod`` in Pa²."""
+    dP = P_inj - np.asarray(P_prod)
+    return float(np.var(dP))
+
+
+def _min_circular_separation_deg(angles_rad: np.ndarray) -> float:
+    """Return minimum pairwise angular separation on a circle in degrees."""
+    wrapped = np.mod(np.asarray(angles_rad), 2.0 * np.pi)
+    wrapped.sort()
+    gaps = np.diff(np.concatenate([wrapped, wrapped[:1] + 2.0 * np.pi]))
+    return float(np.min(gaps) * 180.0 / np.pi)
+
+
+def optimize_outer_producer_ring(
+    inj_xy: np.ndarray,
+    P_inj: float,
+    q_prod: float,
+    params: dict,
+    R_inj: float,
+    R_prod_bounds: Tuple[float, float],
+    n_outer: int = 4,
+    n_radius_samples: int = 60,
+    n_angle_trials: int = 4000,
+    min_angle_deg: float = 10.0,
+    random_seed: int = 42,
+) -> Dict[str, np.ndarray]:
+    """
+    Optimize outer producer coordinates for minimum pressure-drop variance.
+
+    The optimization assumes:
+    - 1 center producer fixed at (0, 0)
+    - ``n_outer`` producers on one ring with shared radius ``R_prod``
+    - each outer producer angle is independently optimized
+
+    Constraints:
+    - shared outer radius ``R_prod``
+    - minimum circular angular separation >= ``min_angle_deg``
+
+    Objective:
+        minimize var(P_inj - P_prod[i])
+
+    where ``P_prod`` is computed from superposition of all injector-to-producer
+    conductances ``sum_j (1/Z_ij)`` under equal-rate constraints.
+    """
+    r_min, r_max = R_prod_bounds
+    if r_min <= R_inj:
+        raise ValueError('R_prod_bounds[0] must be greater than R_inj.')
+    if r_max <= r_min:
+        raise ValueError('R_prod_bounds must satisfy r_max > r_min.')
+    if min_angle_deg <= 0.0:
+        raise ValueError('min_angle_deg must be positive.')
+    if n_outer * min_angle_deg >= 360.0:
+        raise ValueError('min_angle_deg is too large for the number of outer producers.')
+
+    radii = np.linspace(r_min, r_max, n_radius_samples)
+    rng = np.random.default_rng(random_seed)
+
+    # Candidate angle sets: include baseline equally spaced set + random independent sets
+    angle_candidates = [np.arange(n_outer) * (2.0 * np.pi / n_outer)]
+    max_attempts = max(50 * n_angle_trials, 2000)
+    attempts = 0
+    while len(angle_candidates) < n_angle_trials + 1 and attempts < max_attempts:
+        attempts += 1
+        angles = np.sort(rng.uniform(0.0, 2.0 * np.pi, size=n_outer))
+        if _min_circular_separation_deg(angles) >= min_angle_deg:
+            angle_candidates.append(angles)
+
+    if len(angle_candidates) < 2:
+        raise ValueError('Failed to generate valid outer producer angles under min_angle_deg constraint.')
+
+    best = None
+    for R_prod in radii:
+        for angles in angle_candidates:
+            prod_xy = np.vstack([
+                np.array([[0.0, 0.0]]),
+                np.column_stack((R_prod * np.cos(angles), R_prod * np.sin(angles))),
+            ])
+
+            Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
+            P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
+            var_dp = pressure_drop_variance(P_inj, P_prod)
+
+            if best is None or var_dp < best['variance_dP']:
+                best = {
+                    'prod_xy': prod_xy,
+                    'P_prod': P_prod,
+                    'q_ij': q_ij,
+                    'q_inj': q_inj,
+                    'Z': Z,
+                    'R_prod': np.array(R_prod),
+                    'outer_angles_rad': np.array(angles),
+                    'outer_angles_deg': np.array(angles * 180.0 / np.pi),
+                    'min_angle_deg_achieved': np.array(_min_circular_separation_deg(angles)),
+                    'variance_dP': np.array(var_dp),
+                }
+
+    return best
+
+
+def solve_producer_bhp_variable_rate(
+    P_inj: float,
+    q_prod_vec: np.ndarray,
+    Z: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Solve producer BHPs when each producer has its own target mass flow rate.
+
+    Parameters
+    ----------
+    P_inj : float
+        Shared injector BHP in Pa.
+    q_prod_vec : np.ndarray
+        Producer flow targets of shape (n_prod,) in kg/s.
+    Z : np.ndarray
+        Impedance matrix of shape (n_prod, n_inj) in Pa/(kg/s).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        ``P_prod`` (Pa), ``q_ij`` (kg/s), and ``q_inj`` (kg/s).
+    """
+    Z = np.asarray(Z, dtype=float)
+    q_prod_vec = np.asarray(q_prod_vec, dtype=float)
+
+    if Z.ndim != 2:
+        raise ValueError('Z must be 2D [n_prod, n_inj].')
+    n_prod, _ = Z.shape
+    if q_prod_vec.shape != (n_prod,):
+        raise ValueError('q_prod_vec shape must be (n_prod,).')
+    if np.any(q_prod_vec <= 0):
+        raise ValueError('q_prod_vec must contain positive values.')
+    if np.any(Z <= 0) or np.any(~np.isfinite(Z)):
+        raise ValueError('Impedance matrix contains invalid values.')
+
+    Y = 1.0 / Z
+    S_vec = np.sum(Y, axis=1)
+    P_prod = P_inj - q_prod_vec / S_vec
+
+    dP = P_inj - P_prod
+    q_ij = dP[:, np.newaxis] / Z
+    q_inj = np.sum(q_ij, axis=0)
+    return P_prod, q_ij, q_inj
+
+
+def _pressure_uniformity_ratio(P_prod: np.ndarray) -> float:
+    """Relative producer-pressure spread: (max-min)/mean."""
+    P_prod = np.asarray(P_prod, dtype=float)
+    mean_p = float(np.mean(P_prod))
+    if mean_p == 0.0:
+        return np.inf
+    return float((np.max(P_prod) - np.min(P_prod)) / abs(mean_p))
+
+
+def optimize_producer_layout_priority(
+    inj_xy: np.ndarray,
+    P_inj: float,
+    q_total: float,
+    params: dict,
+    R_inj: float,
+    outer_radius_bounds: Tuple[float, float],
+    center_radius_max: float,
+    n_trials: int = 12000,
+    pressure_tolerance_ratio: float = 0.05,
+    random_seed: int = 42,
+) -> Dict[str, np.ndarray]:
+    """Priority optimizer: pressure consistency first, then layout uniformity.
+
+    Decision variables (5 producers):
+    - one "center" producer location (free within ``center_radius_max``)
+    - four outer producer locations (independent angles/radii)
+    - producer flow split ``q_prod_vec`` with ``sum(q_prod_vec) = q_total``
+
+    Priority (lexicographic):
+    1) Minimize producer pressure spread and satisfy ``pressure_tolerance_ratio``.
+    2) Under (1), maximize spacing/uniformity:
+       - larger min injector-to-outer-producer distance
+       - larger min producer-to-producer distance
+       - more even angular gaps among outer producers.
+    """
+    inj_xy = np.asarray(inj_xy, dtype=float)
+    center_xy = np.mean(inj_xy, axis=0)
+
+    r_min, r_max = outer_radius_bounds
+    if r_min <= R_inj:
+        raise ValueError('outer_radius_bounds[0] must be greater than R_inj.')
+    if r_max <= r_min:
+        raise ValueError('outer_radius_bounds must satisfy r_max > r_min.')
+    if q_total <= 0.0:
+        raise ValueError('q_total must be positive.')
+
+    rng = np.random.default_rng(random_seed)
+    best = None
+
+    for _ in range(n_trials):
+        # center producer (not fixed at injector-ring center)
+        theta_c = rng.uniform(0.0, 2.0 * np.pi)
+        r_c = rng.uniform(0.0, center_radius_max)
+        p_center = center_xy + np.array([r_c * np.cos(theta_c), r_c * np.sin(theta_c)])
+
+        # independent outer producers, each beyond injector-ring radius
+        outer_theta = np.sort(rng.uniform(0.0, 2.0 * np.pi, size=4))
+        outer_r = rng.uniform(r_min, r_max, size=4)
+        outer_xy = center_xy + np.column_stack((outer_r * np.cos(outer_theta), outer_r * np.sin(outer_theta)))
+
+        prod_xy = np.vstack([p_center, outer_xy])
+
+        # variable producer flow split (positive and summing to q_total)
+        frac = rng.dirichlet(alpha=np.ones(5) * 3.0)
+        q_prod_vec = q_total * frac
+
+        Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
+        P_prod, q_ij, q_inj = solve_producer_bhp_variable_rate(P_inj, q_prod_vec, Z)
+
+        pressure_ratio = _pressure_uniformity_ratio(P_prod)
+        pressure_violation = max(0.0, pressure_ratio - pressure_tolerance_ratio)
+
+        # uniformity terms
+        d_ip_outer = np.linalg.norm(outer_xy[:, None, :] - inj_xy[None, :, :], axis=2)
+        min_ip_outer = float(np.min(d_ip_outer))
+
+        d_pp = np.linalg.norm(prod_xy[:, None, :] - prod_xy[None, :, :], axis=2)
+        d_pp = d_pp + np.eye(5) * 1e9
+        min_pp = float(np.min(d_pp))
+
+        gaps = np.diff(np.concatenate([outer_theta, outer_theta[:1] + 2.0 * np.pi]))
+        gap_cv = float(np.std(gaps) / np.mean(gaps))
+
+        # second-stage utility (higher is better)
+        utility = 1.0 * min_ip_outer + 0.7 * min_pp - 120.0 * gap_cv
+
+        candidate = {
+            'prod_xy': prod_xy,
+            'q_prod_vec': q_prod_vec,
+            'P_prod': P_prod,
+            'q_ij': q_ij,
+            'q_inj': q_inj,
+            'Z': Z,
+            'pressure_uniformity_ratio': np.array(pressure_ratio),
+            'pressure_tolerance_ratio': np.array(pressure_tolerance_ratio),
+            'min_ip_outer': np.array(min_ip_outer),
+            'min_pp': np.array(min_pp),
+            'gap_cv_outer': np.array(gap_cv),
+            'utility': np.array(utility),
+            'outer_theta_deg': np.array(outer_theta * 180.0 / np.pi),
+            'outer_r': np.array(outer_r),
+            'center_xy': np.array(p_center),
+        }
+
+        if best is None:
+            best = candidate
+            continue
+
+        # lexicographic comparison: pressure first, then utility
+        best_violation = max(0.0, float(best['pressure_uniformity_ratio']) - pressure_tolerance_ratio)
+        if pressure_violation < best_violation - 1e-12:
+            best = candidate
+        elif abs(pressure_violation - best_violation) <= 1e-12:
+            # both satisfy (or violate equally), then prefer lower pressure ratio then higher utility
+            if pressure_ratio < float(best['pressure_uniformity_ratio']) - 1e-12:
+                best = candidate
+            elif abs(pressure_ratio - float(best['pressure_uniformity_ratio'])) <= 1e-12 and utility > float(best['utility']):
+                best = candidate
+
+    return best
+
+
 def validate_solution(
     q_ij: np.ndarray,
     q_prod: float,
@@ -325,6 +591,36 @@ def validate_solution(
                 f"computed flow = {q_prod_computed[i]:.6f} kg/s, "
                 f"expected = {q_prod:.6f} kg/s, "
                 f"relative error = {err:.2e} > tolerance {tol:.2e}"
+            )
+
+
+def validate_solution_variable_rate(
+    q_ij: np.ndarray,
+    q_prod_vec: np.ndarray,
+    tol: float = 1e-6,
+) -> None:
+    """Validate producer balances for variable per-producer target rates."""
+    q_ij = np.asarray(q_ij, dtype=float)
+    q_prod_vec = np.asarray(q_prod_vec, dtype=float)
+
+    if q_ij.ndim != 2:
+        raise ValueError('q_ij must be 2D [n_prod, n_inj].')
+    n_prod, _ = q_ij.shape
+    if q_prod_vec.shape != (n_prod,):
+        raise ValueError('q_prod_vec shape must be (n_prod,).')
+
+    if np.any(q_ij < 0):
+        neg_indices = np.argwhere(q_ij < 0)
+        raise ValueError(f'Negative pairwise flows detected at indices: {neg_indices.tolist()}')
+
+    q_prod_computed = np.sum(q_ij, axis=1)
+    denom = np.maximum(np.abs(q_prod_vec), 1e-30)
+    relative_error = np.abs(q_prod_computed - q_prod_vec) / denom
+    for i, err in enumerate(relative_error):
+        if err > tol:
+            raise ValueError(
+                f"Mass balance violated at producer {i}: computed flow = {q_prod_computed[i]:.6f} kg/s, "
+                f"expected = {q_prod_vec[i]:.6f} kg/s, relative error = {err:.2e} > tolerance {tol:.2e}"
             )
 
 
