@@ -19,10 +19,12 @@ import numpy as np
 
 from patterns.geometry import Well
 from models.pressure_only import (
+    validate_solution,
     validate_total_mass_balance,
     validate_solution_variable_rate,
     solve_pressure_allocation,
     optimize_producer_layout_priority,
+    optimize_outer_producer_ring,
 )
 
 
@@ -284,6 +286,24 @@ def main():
         pressure_tolerance_ratio=0.05,
         random_seed=42,
     )
+    inj_xy = np.array([[w.x, w.y] for w in injectors])
+
+    opt = optimize_outer_producer_ring(
+        inj_xy=inj_xy,
+        P_inj=P_inj,
+        q_prod=q_prod,
+        params=params,
+        R_inj=R_inj,
+        R_prod_bounds=(R_inj + 50.0, 1200.0),
+        n_outer=4,
+        n_radius_samples=40,
+        n_angle_trials=3000,
+        min_angle_deg=10.0,
+        random_seed=42,
+    )
+
+    prod_xy = opt['prod_xy']
+    producers = [Well(x, y, 'producer') for x, y in prod_xy]
 
     prod_xy = opt['prod_xy']
     producers = [Well(x, y, 'producer') for x, y in prod_xy]
@@ -307,6 +327,13 @@ def main():
     for i, qi in enumerate(q_prod_vec):
         print(f"  Producer {i}: {float(qi):.4f}")
 
+    print(f"Created {len(injectors)} fixed injectors and optimized {len(producers)} producers")
+    print(f"Optimized outer producer radius: {float(opt['R_prod']):.3f} m")
+    print("Optimized outer producer angles [deg]:")
+    for idx, ang in enumerate(opt['outer_angles_deg'], start=1):
+        print(f"  Outer producer {idx}: {ang:.3f}°")
+    print(f"Minimum angular spacing achieved: {float(opt['min_angle_deg_achieved']):.3f}°")
+    print(f"Pressure-drop variance objective: {float(opt['variance_dP']):.4e} Pa^2")
     print_well_layout(injectors, producers)
     plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(np.max(opt['outer_r'])))
 
