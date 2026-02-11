@@ -430,7 +430,9 @@ def optimize_producer_layout_priority(
     params: dict,
     R_inj: float,
     outer_radius_bounds: Tuple[float, float],
-    center_radius_max: float,
+    center_radius_max: float = 150.0,
+    min_outer_gap_deg: float = 20.0,
+    lambda_r: float = 1.0,
     n_trials: int = 12000,
     pressure_tolerance_ratio: float = 0.05,
     random_seed: int = 42,
@@ -439,7 +441,7 @@ def optimize_producer_layout_priority(
 
     Decision variables (5 producers):
     - one "center" producer location (free within ``center_radius_max``)
-    - four outer producer locations (independent angles/radii)
+    - four outer producer locations (shared outer radius + constrained angles)
     - producer flow split ``q_prod_vec`` with ``sum(q_prod_vec) = q_total``
 
     Priority (lexicographic):
@@ -459,6 +461,12 @@ def optimize_producer_layout_priority(
         raise ValueError('outer_radius_bounds must satisfy r_max > r_min.')
     if q_total <= 0.0:
         raise ValueError('q_total must be positive.')
+    if center_radius_max < 0.0:
+        raise ValueError('center_radius_max must be non-negative.')
+    if min_outer_gap_deg <= 0.0:
+        raise ValueError('min_outer_gap_deg must be positive.')
+    if min_outer_gap_deg >= 90.0:
+        raise ValueError('min_outer_gap_deg must be < 90 for 4 outer producers.')
 
     rng = np.random.default_rng(random_seed)
     best = None
@@ -469,10 +477,22 @@ def optimize_producer_layout_priority(
         r_c = rng.uniform(0.0, center_radius_max)
         p_center = center_xy + np.array([r_c * np.cos(theta_c), r_c * np.sin(theta_c)])
 
-        # independent outer producers, each beyond injector-ring radius
-        outer_theta = np.sort(rng.uniform(0.0, 2.0 * np.pi, size=4))
-        outer_r = rng.uniform(r_min, r_max, size=4)
-        outer_xy = center_xy + np.column_stack((outer_r * np.cos(outer_theta), outer_r * np.sin(outer_theta)))
+        # Outer producers on a shared radius. Angle gaps constrained to 90±10 deg.
+        outer_r_scalar = rng.uniform(r_min, r_max)
+        base_theta = rng.uniform(0.0, 2.0 * np.pi)
+        # perturb each nominal 90deg gap, then normalize to 360deg
+        gap_nominal = np.full(4, 90.0)
+        gap_perturb = rng.uniform(-10.0, 10.0, size=4)
+        gap_deg = gap_nominal + gap_perturb
+        gap_deg *= 360.0 / np.sum(gap_deg)
+        if np.min(gap_deg) < min_outer_gap_deg or np.max(gap_deg) > 100.0:
+            continue
+
+        outer_theta = np.radians(np.cumsum(np.concatenate([[base_theta * 180.0 / np.pi], gap_deg[:-1]])))
+        outer_theta = np.mod(outer_theta, 2.0 * np.pi)
+        outer_theta = np.sort(outer_theta)
+        outer_r = np.full(4, outer_r_scalar)
+        outer_xy = center_xy + np.column_stack((outer_r_scalar * np.cos(outer_theta), outer_r_scalar * np.sin(outer_theta)))
 
         prod_xy = np.vstack([p_center, outer_xy])
 
@@ -496,9 +516,10 @@ def optimize_producer_layout_priority(
 
         gaps = np.diff(np.concatenate([outer_theta, outer_theta[:1] + 2.0 * np.pi]))
         gap_cv = float(np.std(gaps) / np.mean(gaps))
+        std_outer_r = float(np.std(outer_r))
 
         # second-stage utility (higher is better)
-        utility = 1.0 * min_ip_outer + 0.7 * min_pp - 120.0 * gap_cv
+        utility = 1.0 * min_ip_outer + 0.7 * min_pp - 120.0 * gap_cv - lambda_r * std_outer_r
 
         candidate = {
             'prod_xy': prod_xy,
@@ -512,6 +533,7 @@ def optimize_producer_layout_priority(
             'min_ip_outer': np.array(min_ip_outer),
             'min_pp': np.array(min_pp),
             'gap_cv_outer': np.array(gap_cv),
+            'std_outer_r': np.array(std_outer_r),
             'utility': np.array(utility),
             'outer_theta_deg': np.array(outer_theta * 180.0 / np.pi),
             'outer_r': np.array(outer_r),
@@ -522,16 +544,44 @@ def optimize_producer_layout_priority(
             best = candidate
             continue
 
-        # lexicographic comparison: pressure first, then utility
+        # layered comparison: pressure first, then spacing/uniformity hierarchy
         best_violation = max(0.0, float(best['pressure_uniformity_ratio']) - pressure_tolerance_ratio)
         if pressure_violation < best_violation - 1e-12:
             best = candidate
-        elif abs(pressure_violation - best_violation) <= 1e-12:
-            # both satisfy (or violate equally), then prefer lower pressure ratio then higher utility
-            if pressure_ratio < float(best['pressure_uniformity_ratio']) - 1e-12:
-                best = candidate
-            elif abs(pressure_ratio - float(best['pressure_uniformity_ratio'])) <= 1e-12 and utility > float(best['utility']):
-                best = candidate
+            continue
+        if pressure_violation > best_violation + 1e-12:
+            continue
+
+        if pressure_ratio < float(best['pressure_uniformity_ratio']) - 1e-12:
+            best = candidate
+            continue
+        if pressure_ratio > float(best['pressure_uniformity_ratio']) + 1e-12:
+            continue
+
+        if min_ip_outer > float(best['min_ip_outer']) + 1e-12:
+            best = candidate
+            continue
+        if min_ip_outer < float(best['min_ip_outer']) - 1e-12:
+            continue
+
+        if min_pp > float(best['min_pp']) + 1e-12:
+            best = candidate
+            continue
+        if min_pp < float(best['min_pp']) - 1e-12:
+            continue
+
+        if gap_cv < float(best['gap_cv_outer']) - 1e-12:
+            best = candidate
+            continue
+        if gap_cv > float(best['gap_cv_outer']) + 1e-12:
+            continue
+
+        if std_outer_r < float(best['std_outer_r']) - 1e-12:
+            best = candidate
+            continue
+
+        if utility > float(best['utility']):
+            best = candidate
 
     return best
 

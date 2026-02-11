@@ -13,18 +13,17 @@ No thermal effects are considered. This is a pressure-only model.
 
 import sys
 import os
+from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 
 from patterns.geometry import Well
 from models.pressure_only import (
-    validate_solution,
     validate_total_mass_balance,
     validate_solution_variable_rate,
     solve_pressure_allocation,
     optimize_producer_layout_priority,
-    optimize_outer_producer_ring,
 )
 
 
@@ -146,11 +145,16 @@ def plot_well_layout(injectors, producers, R_inj: float, R_prod: float, output_p
     ax.set_title('Pressure-only Well Layout (3 Injectors / 5 Producers)')
     ax.legend(loc='upper right')
 
+    output = Path(output_path)
+    if not output.is_absolute():
+        output = Path(__file__).resolve().parent.parent / output
+    output.parent.mkdir(parents=True, exist_ok=True)
+
     fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output, dpi=180)
     plt.close(fig)
-    print(f"Saved coordinate plot: {output_path}")
-    return output_path
+    print(f"Saved coordinate plot: {output}")
+    return str(output)
 
 
 def print_results(P_prod, q_ij, q_inj, producers, injectors, P_inj, q_prod):
@@ -281,29 +285,13 @@ def main():
         params=params,
         R_inj=R_inj,
         outer_radius_bounds=(R_inj + 50.0, 1200.0),
-        center_radius_max=0.9 * R_inj,
-        n_trials=20000,
+        center_radius_max=150.0,
+        min_outer_gap_deg=20.0,
+        lambda_r=1.0,
+        n_trials=25000,
         pressure_tolerance_ratio=0.05,
         random_seed=42,
     )
-    inj_xy = np.array([[w.x, w.y] for w in injectors])
-
-    opt = optimize_outer_producer_ring(
-        inj_xy=inj_xy,
-        P_inj=P_inj,
-        q_prod=q_prod,
-        params=params,
-        R_inj=R_inj,
-        R_prod_bounds=(R_inj + 50.0, 1200.0),
-        n_outer=4,
-        n_radius_samples=40,
-        n_angle_trials=3000,
-        min_angle_deg=10.0,
-        random_seed=42,
-    )
-
-    prod_xy = opt['prod_xy']
-    producers = [Well(x, y, 'producer') for x, y in prod_xy]
 
     prod_xy = opt['prod_xy']
     producers = [Well(x, y, 'producer') for x, y in prod_xy]
@@ -316,6 +304,13 @@ def main():
     print(f"  min(inj-to-outer-prod distance): {float(opt['min_ip_outer']):.3f} m")
     print(f"  min(prod-to-prod distance):      {float(opt['min_pp']):.3f} m")
     print(f"  outer angle-gap CV:              {float(opt['gap_cv_outer']):.4f}")
+    print(f"  std(outer radii):                {float(opt['std_outer_r']):.3f} m")
+    center_xy = np.mean(inj_xy, axis=0)
+    center_dist = np.linalg.norm(opt['center_xy'] - center_xy)
+    sorted_deg = np.sort(opt['outer_theta_deg'])
+    gaps_deg = np.diff(np.concatenate([sorted_deg, [sorted_deg[0] + 360.0]]))
+    print(f"  center producer distance to injector-ring center: {center_dist:.3f} m")
+    print(f"  minimum outer angular gap: {np.min(gaps_deg):.3f}°")
     print("Outer producer polar coordinates (deg, m):")
     for idx, (ang, rr) in enumerate(zip(opt['outer_theta_deg'], opt['outer_r']), start=1):
         print(f"  Outer producer {idx}: angle={float(ang):.3f}°, radius={float(rr):.3f} m")
@@ -327,13 +322,6 @@ def main():
     for i, qi in enumerate(q_prod_vec):
         print(f"  Producer {i}: {float(qi):.4f}")
 
-    print(f"Created {len(injectors)} fixed injectors and optimized {len(producers)} producers")
-    print(f"Optimized outer producer radius: {float(opt['R_prod']):.3f} m")
-    print("Optimized outer producer angles [deg]:")
-    for idx, ang in enumerate(opt['outer_angles_deg'], start=1):
-        print(f"  Outer producer {idx}: {ang:.3f}°")
-    print(f"Minimum angular spacing achieved: {float(opt['min_angle_deg_achieved']):.3f}°")
-    print(f"Pressure-drop variance objective: {float(opt['variance_dP']):.4e} Pa^2")
     print_well_layout(injectors, producers)
     plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(np.max(opt['outer_r'])))
 
@@ -428,6 +416,7 @@ def main():
     print(f"  - Pressure uniformity CV: {np.std(P_prod)/np.mean(P_prod)*100:.2f}%")
     print(f"  - Total injection: {np.sum(q_inj):.2f} kg/s")
     print(f"  - Total production: {q_total:.2f} kg/s")
+    print("  - Injector mass flow rates [kg/s]: " + ", ".join([f"I{j}={q:.2f}" for j, q in enumerate(q_inj)]))
     print("\n✓ Demo completed successfully!")
     print("=" * 70)
 

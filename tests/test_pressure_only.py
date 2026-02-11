@@ -500,7 +500,9 @@ class TestPriorityLayoutOptimizer:
             params=params,
             R_inj=300.0,
             outer_radius_bounds=(350.0, 1100.0),
-            center_radius_max=270.0,
+            center_radius_max=150.0,
+            min_outer_gap_deg=20.0,
+            lambda_r=1.0,
             n_trials=3000,
             pressure_tolerance_ratio=0.05,
             random_seed=11,
@@ -515,6 +517,15 @@ class TestPriorityLayoutOptimizer:
         center_xy = np.mean(inj_xy, axis=0)
         outer_r = np.linalg.norm(result['prod_xy'][1:] - center_xy, axis=1)
         assert np.all(outer_r > 300.0)
+
+        center_dist = np.linalg.norm(result['prod_xy'][0] - center_xy)
+        assert center_dist <= 150.0 + 1e-9
+
+        outer_theta = np.sort(np.mod(np.arctan2(result['prod_xy'][1:, 1] - center_xy[1], result['prod_xy'][1:, 0] - center_xy[0]), 2.0 * np.pi))
+        gaps_deg = np.diff(np.concatenate([outer_theta, [outer_theta[0] + 2.0 * np.pi]])) * 180.0 / np.pi
+        assert np.min(gaps_deg) >= 80.0
+        assert np.max(gaps_deg) <= 100.0
+        assert 'std_outer_r' in result
 
         # Balance checks
         for i in range(5):
