@@ -288,6 +288,7 @@ def main():
         center_radius_max=150.0,
         min_outer_gap_deg=20.0,
         lambda_r=1.0,
+        injector_flow_bounds=(20.0, 60.0),
         n_trials=25000,
         pressure_tolerance_ratio=0.05,
         random_seed=42,
@@ -301,7 +302,8 @@ def main():
     print(f"  pressure uniformity ratio: {float(opt['pressure_uniformity_ratio'])*100:.3f}%")
     print(f"  tolerance ratio:           {float(opt['pressure_tolerance_ratio'])*100:.3f}%")
     print("Second-stage uniformity metrics:")
-    print(f"  min(inj-to-outer-prod distance): {float(opt['min_ip_outer']):.3f} m")
+    print(f"  min(inj-to-prod distance, all producers): {float(opt['min_ip_all']):.3f} m")
+    print(f"  min(inj-to-outer-prod distance):          {float(opt['min_ip_outer']):.3f} m")
     print(f"  min(prod-to-prod distance):      {float(opt['min_pp']):.3f} m")
     print(f"  outer angle-gap CV:              {float(opt['gap_cv_outer']):.4f}")
     print(f"  std(outer radii):                {float(opt['std_outer_r']):.3f} m")
@@ -317,6 +319,9 @@ def main():
 
     q_prod_vec = opt['q_prod_vec']
     q_prod = float(np.mean(q_prod_vec))
+
+    if opt['injector_flow_bounds'] is not None:
+        print(f"Injector flow bounds [kg/s]: {tuple(opt['injector_flow_bounds'])}")
 
     print("Optimized variable producer flow split [kg/s]:")
     for i, qi in enumerate(q_prod_vec):
@@ -411,6 +416,7 @@ def main():
     print(f"Boundary conditions:")
     print(f"  - Injector BHP (Dirichlet): {P_inj/1e6:.1f} MPa (fixed)")
     print(f"  - Producer rates (Neumann): variable, mean {np.mean(q_prod_vec):.2f} kg/s")
+    print("  - Injector mass flow rates are not fixed; solved from pressure/impedance coupling.")
     print(f"\nKey results:")
     print(f"  - Producer BHP range: {np.min(P_prod)/1e6:.4f} - {np.max(P_prod)/1e6:.4f} MPa")
     print(f"  - Pressure uniformity CV: {np.std(P_prod)/np.mean(P_prod)*100:.2f}%")

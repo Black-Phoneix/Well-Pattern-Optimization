@@ -433,6 +433,7 @@ def optimize_producer_layout_priority(
     center_radius_max: float = 150.0,
     min_outer_gap_deg: float = 20.0,
     lambda_r: float = 1.0,
+    injector_flow_bounds: Tuple[float, float] | None = None,
     n_trials: int = 12000,
     pressure_tolerance_ratio: float = 0.05,
     random_seed: int = 42,
@@ -443,10 +444,12 @@ def optimize_producer_layout_priority(
     - one "center" producer location (free within ``center_radius_max``)
     - four outer producer locations (shared outer radius + constrained angles)
     - producer flow split ``q_prod_vec`` with ``sum(q_prod_vec) = q_total``
+      (which implicitly adjusts injector mass flows through coupling)
 
     Priority (lexicographic):
     1) Minimize producer pressure spread and satisfy ``pressure_tolerance_ratio``.
     2) Under (1), maximize spacing/uniformity:
+       - larger min injector-to-producer distance (all producers)
        - larger min injector-to-outer-producer distance
        - larger min producer-to-producer distance
        - more even angular gaps among outer producers.
@@ -467,6 +470,10 @@ def optimize_producer_layout_priority(
         raise ValueError('min_outer_gap_deg must be positive.')
     if min_outer_gap_deg >= 90.0:
         raise ValueError('min_outer_gap_deg must be < 90 for 4 outer producers.')
+    if injector_flow_bounds is not None:
+        qinj_min, qinj_max = injector_flow_bounds
+        if qinj_min < 0 or qinj_max <= qinj_min:
+            raise ValueError('injector_flow_bounds must satisfy 0 <= min < max.')
 
     rng = np.random.default_rng(random_seed)
     best = None
@@ -503,11 +510,18 @@ def optimize_producer_layout_priority(
         Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
         P_prod, q_ij, q_inj = solve_producer_bhp_variable_rate(P_inj, q_prod_vec, Z)
 
+        if injector_flow_bounds is not None:
+            qinj_min, qinj_max = injector_flow_bounds
+            if np.any(q_inj < qinj_min) or np.any(q_inj > qinj_max):
+                continue
+
         pressure_ratio = _pressure_uniformity_ratio(P_prod)
         pressure_violation = max(0.0, pressure_ratio - pressure_tolerance_ratio)
 
         # uniformity terms
+        d_ip_all = np.linalg.norm(prod_xy[:, None, :] - inj_xy[None, :, :], axis=2)
         d_ip_outer = np.linalg.norm(outer_xy[:, None, :] - inj_xy[None, :, :], axis=2)
+        min_ip_all = float(np.min(d_ip_all))
         min_ip_outer = float(np.min(d_ip_outer))
 
         d_pp = np.linalg.norm(prod_xy[:, None, :] - prod_xy[None, :, :], axis=2)
@@ -519,7 +533,7 @@ def optimize_producer_layout_priority(
         std_outer_r = float(np.std(outer_r))
 
         # second-stage utility (higher is better)
-        utility = 1.0 * min_ip_outer + 0.7 * min_pp - 120.0 * gap_cv - lambda_r * std_outer_r
+        utility = 1.0 * min_ip_all + 0.7 * min_pp - 120.0 * gap_cv - lambda_r * std_outer_r
 
         candidate = {
             'prod_xy': prod_xy,
@@ -530,6 +544,7 @@ def optimize_producer_layout_priority(
             'Z': Z,
             'pressure_uniformity_ratio': np.array(pressure_ratio),
             'pressure_tolerance_ratio': np.array(pressure_tolerance_ratio),
+            'min_ip_all': np.array(min_ip_all),
             'min_ip_outer': np.array(min_ip_outer),
             'min_pp': np.array(min_pp),
             'gap_cv_outer': np.array(gap_cv),
@@ -538,6 +553,7 @@ def optimize_producer_layout_priority(
             'outer_theta_deg': np.array(outer_theta * 180.0 / np.pi),
             'outer_r': np.array(outer_r),
             'center_xy': np.array(p_center),
+            'injector_flow_bounds': None if injector_flow_bounds is None else np.array(injector_flow_bounds),
         }
 
         if best is None:
@@ -556,6 +572,12 @@ def optimize_producer_layout_priority(
             best = candidate
             continue
         if pressure_ratio > float(best['pressure_uniformity_ratio']) + 1e-12:
+            continue
+
+        if min_ip_all > float(best['min_ip_all']) + 1e-12:
+            best = candidate
+            continue
+        if min_ip_all < float(best['min_ip_all']) - 1e-12:
             continue
 
         if min_ip_outer > float(best['min_ip_outer']) + 1e-12:

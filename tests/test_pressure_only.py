@@ -526,7 +526,40 @@ class TestPriorityLayoutOptimizer:
         assert np.min(gaps_deg) >= 80.0
         assert np.max(gaps_deg) <= 100.0
         assert 'std_outer_r' in result
+        assert 'min_ip_all' in result
 
         # Balance checks
         for i in range(5):
             assert np.isclose(np.sum(result['q_ij'][i, :]), result['q_prod_vec'][i], rtol=1e-10)
+
+    def test_priority_optimizer_respects_injector_flow_bounds(self):
+        injectors, _ = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+
+        result = optimize_producer_layout_priority(
+            inj_xy=inj_xy,
+            P_inj=30e6,
+            q_total=126.8,
+            params=params,
+            R_inj=300.0,
+            outer_radius_bounds=(350.0, 1100.0),
+            center_radius_max=150.0,
+            min_outer_gap_deg=20.0,
+            lambda_r=1.0,
+            injector_flow_bounds=(20.0, 60.0),
+            n_trials=2500,
+            pressure_tolerance_ratio=0.05,
+            random_seed=9,
+        )
+
+        assert np.all(result['q_inj'] >= 20.0)
+        assert np.all(result['q_inj'] <= 60.0)
+
