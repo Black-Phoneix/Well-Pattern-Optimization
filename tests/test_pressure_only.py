@@ -24,6 +24,10 @@ from models.pressure_only import (
     validate_solution,
     validate_total_mass_balance,
     solve_pressure_allocation,
+    optimize_outer_producer_ring,
+    pressure_drop_variance,
+    solve_producer_bhp_variable_rate,
+    optimize_producer_layout_priority,
 )
 from patterns.geometry import (
     Well,
@@ -421,3 +425,141 @@ class TestNonSymmetricGeometry:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestProducerCoordinateOptimization:
+    """Test producer-coordinate optimization with fixed injectors."""
+
+    def test_optimize_outer_ring_reduces_pressure_drop_variance(self):
+        """Optimizer should not be worse than a baseline ring layout."""
+        injectors, producers = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+        P_inj = 30e6
+        q_total = 126.8
+        q_prod = q_total / 5.0
+
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        prod_xy_baseline = np.array([[w.x, w.y] for w in producers])
+
+        Z_base = compute_pairwise_impedance(inj_xy, prod_xy_baseline, params)
+        P_base, _, _ = solve_producer_bhp_equal_rate(P_inj, q_prod, Z_base)
+        var_base = pressure_drop_variance(P_inj, P_base)
+
+        opt = optimize_outer_producer_ring(
+            inj_xy=inj_xy,
+            P_inj=P_inj,
+            q_prod=q_prod,
+            params=params,
+            R_inj=300.0,
+            R_prod_bounds=(350.0, 1200.0),
+            n_outer=4,
+            n_radius_samples=20,
+            n_angle_trials=800,
+            min_angle_deg=10.0,
+            random_seed=7,
+        )
+
+        assert opt['prod_xy'].shape == (5, 2)
+        assert float(opt['R_prod']) > 300.0
+        assert float(opt['variance_dP']) <= var_base + 1e-12
+        assert float(opt['min_angle_deg_achieved']) >= 10.0
+
+        # Check mass-balance constraints are still met
+        for i in range(5):
+            assert np.isclose(np.sum(opt['q_ij'][i, :]), q_prod, rtol=1e-10)
+        assert np.isclose(np.sum(opt['q_inj']), q_total, rtol=1e-10)
+
+
+class TestPriorityLayoutOptimizer:
+    """Tests for pressure-first, variable-rate producer layout optimizer."""
+
+    def test_priority_optimizer_pressure_first(self):
+        injectors, _ = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+
+        result = optimize_producer_layout_priority(
+            inj_xy=inj_xy,
+            P_inj=30e6,
+            q_total=126.8,
+            params=params,
+            R_inj=300.0,
+            outer_radius_bounds=(350.0, 1100.0),
+            center_radius_max=150.0,
+            min_outer_gap_deg=20.0,
+            lambda_r=1.0,
+            n_trials=3000,
+            pressure_tolerance_ratio=0.05,
+            random_seed=11,
+        )
+
+        assert result['prod_xy'].shape == (5, 2)
+        assert result['q_prod_vec'].shape == (5,)
+        assert np.isclose(np.sum(result['q_prod_vec']), 126.8, rtol=1e-10)
+        assert float(result['pressure_uniformity_ratio']) <= 0.05
+
+        # Outer producers must be outside injector ring
+        center_xy = np.mean(inj_xy, axis=0)
+        outer_r = np.linalg.norm(result['prod_xy'][1:] - center_xy, axis=1)
+        assert np.all(outer_r > 300.0)
+
+        center_dist = np.linalg.norm(result['prod_xy'][0] - center_xy)
+        assert center_dist <= 150.0 + 1e-9
+
+        outer_theta = np.sort(np.mod(np.arctan2(result['prod_xy'][1:, 1] - center_xy[1], result['prod_xy'][1:, 0] - center_xy[0]), 2.0 * np.pi))
+        gaps_deg = np.diff(np.concatenate([outer_theta, [outer_theta[0] + 2.0 * np.pi]])) * 180.0 / np.pi
+        assert np.min(gaps_deg) >= 80.0
+        assert np.max(gaps_deg) <= 100.0
+        assert 'std_outer_r' in result
+        assert 'min_ip_all' in result
+
+        # Balance checks
+        for i in range(5):
+            assert np.isclose(np.sum(result['q_ij'][i, :]), result['q_prod_vec'][i], rtol=1e-10)
+
+    def test_priority_optimizer_respects_injector_flow_bounds(self):
+        injectors, _ = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+
+        result = optimize_producer_layout_priority(
+            inj_xy=inj_xy,
+            P_inj=30e6,
+            q_total=126.8,
+            params=params,
+            R_inj=300.0,
+            outer_radius_bounds=(350.0, 1100.0),
+            center_radius_max=150.0,
+            min_outer_gap_deg=20.0,
+            lambda_r=1.0,
+            injector_flow_bounds=(20.0, 60.0),
+            n_trials=2500,
+            pressure_tolerance_ratio=0.05,
+            random_seed=9,
+        )
+
+        assert np.all(result['q_inj'] >= 20.0)
+        assert np.all(result['q_inj'] <= 60.0)
+
