@@ -13,8 +13,8 @@ References:
 """
 
 import numpy as np
-from fluid_properties import get_property_h, get_props_T
-from fluid_dynamics import pressure_drop_friction, friction_factor
+from .fluid_properties import get_property_h, get_props_T
+from .fluid_dynamics import pressure_drop_friction, friction_factor
 
 g = 9.81
 

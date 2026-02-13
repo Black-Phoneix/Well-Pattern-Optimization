@@ -25,6 +25,7 @@ import numpy as np
 
 # Import existing modules for reuse
 from patterns.geometry import Well, distance_matrix as geometry_distance_matrix
+from well_model.production_well_dynamics import dry_CO2_model
 
 
 def compute_distance_matrix_from_arrays(
@@ -276,6 +277,54 @@ def pressure_drop_variance(P_inj: float, P_prod: np.ndarray) -> float:
     return float(np.var(dP))
 
 
+def producer_wellhead_pressures_from_bhp(
+    P_prod_bhp: np.ndarray,
+    q_prod_vec: np.ndarray,
+    inlet_temperature: float = 343.15,
+    depth: float = 3000.0,
+    fluid: str = 'CO2',
+    D: float = 0.27,
+    L_segment: float = 100.0,
+    roughness: float = 55e-6,
+) -> np.ndarray:
+    """Convert producer BHP values to producer wellhead pressures.
+
+    Uses one default-parameter call to ``dry_CO2_model`` and applies the computed
+    wellbore pressure loss as a shared offset (fast approximation).
+    """
+    P_prod_bhp = np.asarray(P_prod_bhp, dtype=float)
+    q_prod_vec = np.asarray(q_prod_vec, dtype=float)
+
+    if P_prod_bhp.shape != q_prod_vec.shape:
+        raise ValueError('P_prod_bhp and q_prod_vec must have the same shape.')
+    if np.any(q_prod_vec <= 0.0):
+        raise ValueError('q_prod_vec must contain positive values.')
+
+    q_ref = float(np.mean(q_prod_vec))
+    p_ref = float(np.mean(P_prod_bhp))
+    _, p_profile, _, _, _ = dry_CO2_model(
+        mass_flow=q_ref,
+        inlet_pressure=p_ref,
+        inlet_temperature=inlet_temperature,
+        depth=depth,
+        fluid=fluid,
+        D=D,
+        L_segment=L_segment,
+        roughness=roughness,
+    )
+    dp_wellbore = p_ref - float(p_profile[-1])
+    return P_prod_bhp - dp_wellbore
+
+
+def wellhead_pressure_variance(
+    P_prod_bhp: np.ndarray,
+    q_prod_vec: np.ndarray,
+) -> float:
+    """Return variance of producer wellhead pressures in Pa²."""
+    p_wh = producer_wellhead_pressures_from_bhp(P_prod_bhp, q_prod_vec)
+    return float(np.var(p_wh))
+
+
 def _min_circular_separation_deg(angles_rad: np.ndarray) -> float:
     """Return minimum pairwise angular separation on a circle in degrees."""
     wrapped = np.mod(np.asarray(angles_rad), 2.0 * np.pi)
@@ -351,7 +400,8 @@ def optimize_outer_producer_ring(
 
             Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
             P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
-            var_dp = pressure_drop_variance(P_inj, P_prod)
+            q_prod_vec = np.full(P_prod.shape, q_prod, dtype=float)
+            var_dp = wellhead_pressure_variance(P_prod, q_prod_vec)
 
             if best is None or var_dp < best['variance_dP']:
                 best = {
@@ -515,7 +565,9 @@ def optimize_producer_layout_priority(
             if np.any(q_inj < qinj_min) or np.any(q_inj > qinj_max):
                 continue
 
-        pressure_ratio = _pressure_uniformity_ratio(P_prod)
+        pressure_ratio = _pressure_uniformity_ratio(
+            producer_wellhead_pressures_from_bhp(P_prod, q_prod_vec)
+        )
         pressure_violation = max(0.0, pressure_ratio - pressure_tolerance_ratio)
 
         # uniformity terms

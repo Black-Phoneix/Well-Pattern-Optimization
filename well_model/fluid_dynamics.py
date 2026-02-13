@@ -14,7 +14,7 @@ References:
 
 
 import numpy as np
-from GeoCaP.core.fluid_properties import get_props_T
+from .fluid_properties import get_props_T
 
 
 def friction_factor(Re, D, epsilon):
