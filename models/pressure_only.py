@@ -344,6 +344,7 @@ def optimize_outer_producer_ring(
     n_radius_samples: int = 60,
     n_angle_trials: int = 4000,
     min_angle_deg: float = 10.0,
+    min_ip_factor: float = 0.6,
     random_seed: int = 42,
 ) -> Dict[str, np.ndarray]:
     """
@@ -373,7 +374,10 @@ def optimize_outer_producer_ring(
         raise ValueError('min_angle_deg must be positive.')
     if n_outer * min_angle_deg >= 360.0:
         raise ValueError('min_angle_deg is too large for the number of outer producers.')
+    if not (0.0 < min_ip_factor < 1.0):
+        raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
 
+    dmin_ip = float(min_ip_factor * R_inj)
     radii = np.linspace(r_min, r_max, n_radius_samples)
     rng = np.random.default_rng(random_seed)
 
@@ -398,6 +402,12 @@ def optimize_outer_producer_ring(
                 np.column_stack((R_prod * np.cos(angles), R_prod * np.sin(angles))),
             ])
 
+            # Scheme A hard constraint: all producer-injector distances must exceed dmin_ip.
+            d_ip = np.linalg.norm(prod_xy[:, None, :] - inj_xy[None, :, :], axis=2)
+            min_ip_distance = float(np.min(d_ip))
+            if min_ip_distance < dmin_ip:
+                continue
+
             Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
             P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
             q_prod_vec = np.full(P_prod.shape, q_prod, dtype=float)
@@ -415,6 +425,9 @@ def optimize_outer_producer_ring(
                     'outer_angles_deg': np.array(angles * 180.0 / np.pi),
                     'min_angle_deg_achieved': np.array(_min_circular_separation_deg(angles)),
                     'variance_dP': np.array(var_dp),
+                    'dmin_ip': np.array(dmin_ip),
+                    'min_ip_distance': np.array(min_ip_distance),
+                    'min_ip_constraint_violation': np.array(max(0.0, dmin_ip - min_ip_distance)),
                 }
 
     return best
@@ -482,6 +495,7 @@ def optimize_producer_layout_priority(
     outer_radius_bounds: Tuple[float, float],
     center_radius_max: float = 150.0,
     min_outer_gap_deg: float = 20.0,
+    min_ip_factor: float = 0.6,
     lambda_r: float = 1.0,
     injector_flow_bounds: Tuple[float, float] | None = None,
     n_trials: int = 12000,
@@ -520,6 +534,9 @@ def optimize_producer_layout_priority(
         raise ValueError('min_outer_gap_deg must be positive.')
     if min_outer_gap_deg >= 90.0:
         raise ValueError('min_outer_gap_deg must be < 90 for 4 outer producers.')
+    if not (0.0 < min_ip_factor < 1.0):
+        raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
+    dmin_ip = float(min_ip_factor * R_inj)
     if injector_flow_bounds is not None:
         qinj_min, qinj_max = injector_flow_bounds
         if qinj_min < 0 or qinj_max <= qinj_min:
@@ -553,6 +570,12 @@ def optimize_producer_layout_priority(
 
         prod_xy = np.vstack([p_center, outer_xy])
 
+        # Scheme A hard constraint applied before expensive wellbore/hydraulic calls.
+        d_ip_all = np.linalg.norm(prod_xy[:, None, :] - inj_xy[None, :, :], axis=2)
+        min_ip_all = float(np.min(d_ip_all))
+        if min_ip_all < dmin_ip:
+            continue
+
         # variable producer flow split (positive and summing to q_total)
         frac = rng.dirichlet(alpha=np.ones(5) * 3.0)
         q_prod_vec = q_total * frac
@@ -571,9 +594,7 @@ def optimize_producer_layout_priority(
         pressure_violation = max(0.0, pressure_ratio - pressure_tolerance_ratio)
 
         # uniformity terms
-        d_ip_all = np.linalg.norm(prod_xy[:, None, :] - inj_xy[None, :, :], axis=2)
         d_ip_outer = np.linalg.norm(outer_xy[:, None, :] - inj_xy[None, :, :], axis=2)
-        min_ip_all = float(np.min(d_ip_all))
         min_ip_outer = float(np.min(d_ip_outer))
 
         d_pp = np.linalg.norm(prod_xy[:, None, :] - prod_xy[None, :, :], axis=2)
@@ -598,6 +619,9 @@ def optimize_producer_layout_priority(
             'pressure_tolerance_ratio': np.array(pressure_tolerance_ratio),
             'min_ip_all': np.array(min_ip_all),
             'min_ip_outer': np.array(min_ip_outer),
+            'dmin_ip': np.array(dmin_ip),
+            'min_ip_distance': np.array(min_ip_all),
+            'min_ip_constraint_violation': np.array(max(0.0, dmin_ip - min_ip_all)),
             'min_pp': np.array(min_pp),
             'gap_cv_outer': np.array(gap_cv),
             'std_outer_r': np.array(std_outer_r),
@@ -656,6 +680,138 @@ def optimize_producer_layout_priority(
 
         if utility > float(best['utility']):
             best = candidate
+
+    return best
+
+
+def optimize_layout_equal_injector_rate(
+    inj_xy: np.ndarray,
+    P_inj: float,
+    q_total: float,
+    params: dict,
+    outer_to_inner_radius_ratio: float = 1.302,
+    n_outer: int = 4,
+    n_trials: int = 12000,
+    min_outer_gap_deg: float = 10.0,
+    min_ip_factor: float = 0.6,
+    injector_rate_rtol: float = 0.02,
+    random_seed: int = 42,
+    wellbore_kwargs: dict | None = None,
+) -> Dict[str, np.ndarray]:
+    """Optimize producer layout under fixed-geometry constraints.
+
+    Constraints enforced by construction:
+    - Center producer is fixed at the center of the injector inner ring.
+    - Outer producer ring radius satisfies ``R_prod / R_inj = outer_to_inner_radius_ratio``.
+
+    Additional hard/soft constraint:
+    - Injector mass flow rates should be equal (within ``injector_rate_rtol``).
+
+    Objective:
+    - Minimize variance of producer wellhead pressures, where wellhead pressure is
+      computed from producer BHP with ``producer_wellhead_pressures_from_bhp``
+      (which calls ``well_model.production_well_dynamics.dry_CO2_model``).
+    """
+    inj_xy = np.asarray(inj_xy, dtype=float)
+    if inj_xy.ndim != 2 or inj_xy.shape[1] != 2:
+        raise ValueError('inj_xy must have shape (n_inj, 2).')
+    if q_total <= 0.0:
+        raise ValueError('q_total must be positive.')
+    if outer_to_inner_radius_ratio <= 1.0:
+        raise ValueError('outer_to_inner_radius_ratio must be > 1.0.')
+    if n_outer < 2:
+        raise ValueError('n_outer must be at least 2.')
+    if not (0.0 < min_ip_factor < 1.0):
+        raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
+
+    # Geometry constraints
+    center_xy = np.mean(inj_xy, axis=0)
+    R_inj = float(np.mean(np.linalg.norm(inj_xy - center_xy, axis=1)))
+    R_prod = outer_to_inner_radius_ratio * R_inj
+    dmin_ip = float(min_ip_factor * R_inj)
+
+    rng = np.random.default_rng(random_seed)
+    if wellbore_kwargs is None:
+        wellbore_kwargs = {}
+
+    best = None
+    for _ in range(n_trials):
+        # Outer producer angles: start from quasi-uniform and add jitter.
+        base = rng.uniform(0.0, 2.0 * np.pi)
+        ideal = base + np.arange(n_outer) * (2.0 * np.pi / n_outer)
+        jitter = np.radians(rng.uniform(-12.0, 12.0, size=n_outer))
+        angles = np.mod(ideal + jitter, 2.0 * np.pi)
+        if _min_circular_separation_deg(angles) < min_outer_gap_deg:
+            continue
+
+        outer_xy = center_xy + np.column_stack((R_prod * np.cos(angles), R_prod * np.sin(angles)))
+        prod_xy = np.vstack([center_xy, outer_xy])
+
+        # Scheme A hard constraint: reject short-circuit candidates.
+        d_ip = np.linalg.norm(prod_xy[:, None, :] - inj_xy[None, :, :], axis=2)
+        min_ip_distance = float(np.min(d_ip))
+        if min_ip_distance < dmin_ip:
+            continue
+
+        # Variable producer rates (estimated defaults around equal split).
+        alpha = np.full(n_outer + 1, 5.0)
+        q_prod_vec = q_total * rng.dirichlet(alpha=alpha)
+
+        Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
+        P_prod, q_ij, q_inj = solve_producer_bhp_variable_rate(P_inj, q_prod_vec, Z)
+
+        q_inj_target = float(np.mean(q_inj))
+        inj_rel_spread = float(np.max(np.abs(q_inj - q_inj_target)) / max(q_inj_target, 1e-12))
+        inj_constraint_violation = max(0.0, inj_rel_spread - injector_rate_rtol)
+
+        # Fast search metric: with shared-wellbore-loss approximation, minimizing
+        # BHP variance is equivalent to minimizing wellhead-pressure variance.
+        wh_var = float(np.var(P_prod))
+
+        candidate = {
+            'inj_xy': inj_xy,
+            'prod_xy': prod_xy,
+            'center_xy': center_xy,
+            'outer_angles_deg': np.array(np.degrees(angles)),
+            'R_inj': np.array(R_inj),
+            'R_prod': np.array(R_prod),
+            'radius_ratio': np.array(outer_to_inner_radius_ratio),
+            'q_prod_vec': q_prod_vec,
+            'P_prod': P_prod,
+            'q_ij': q_ij,
+            'q_inj': q_inj,
+            'injector_rate_rtol': np.array(injector_rate_rtol),
+            'injector_rate_rel_spread': np.array(inj_rel_spread),
+            'injector_rate_constraint_violation': np.array(inj_constraint_violation),
+            'dmin_ip': np.array(dmin_ip),
+            'min_ip_distance': np.array(min_ip_distance),
+            'min_ip_constraint_violation': np.array(max(0.0, dmin_ip - min_ip_distance)),
+            'wellhead_pressure_variance': np.array(wh_var),
+            'Z': Z,
+        }
+
+        if best is None:
+            best = candidate
+            continue
+
+        best_violation = float(best['injector_rate_constraint_violation'])
+        if inj_constraint_violation < best_violation - 1e-12:
+            best = candidate
+            continue
+        if inj_constraint_violation > best_violation + 1e-12:
+            continue
+
+        if wh_var < float(best['wellhead_pressure_variance']) - 1e-12:
+            best = candidate
+
+    # Convert selected BHP solution to wellhead pressures using the wellbore model.
+    if best is not None:
+        best['P_wh'] = producer_wellhead_pressures_from_bhp(
+            best['P_prod'],
+            best['q_prod_vec'],
+            **wellbore_kwargs,
+        )
+        best['wellhead_pressure_variance'] = np.array(float(np.var(best['P_wh'])))
 
     return best
 

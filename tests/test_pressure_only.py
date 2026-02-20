@@ -28,6 +28,7 @@ from models.pressure_only import (
     pressure_drop_variance,
     solve_producer_bhp_variable_rate,
     optimize_producer_layout_priority,
+    optimize_layout_equal_injector_rate,
 )
 from patterns.geometry import (
     Well,
@@ -471,6 +472,9 @@ class TestProducerCoordinateOptimization:
         assert float(opt['R_prod']) > 300.0
         assert float(opt['variance_dP']) <= var_base + 1e-12
         assert float(opt['min_angle_deg_achieved']) >= 10.0
+        assert 'dmin_ip' in opt and 'min_ip_distance' in opt and 'min_ip_constraint_violation' in opt
+        assert float(opt['min_ip_distance']) >= float(opt['dmin_ip'])
+        assert np.isclose(float(opt['min_ip_constraint_violation']), 0.0)
 
         # Check mass-balance constraints are still met
         for i in range(5):
@@ -527,6 +531,9 @@ class TestPriorityLayoutOptimizer:
         assert np.max(gaps_deg) <= 100.0
         assert 'std_outer_r' in result
         assert 'min_ip_all' in result
+        assert 'dmin_ip' in result and 'min_ip_distance' in result and 'min_ip_constraint_violation' in result
+        assert float(result['min_ip_distance']) >= float(result['dmin_ip'])
+        assert np.isclose(float(result['min_ip_constraint_violation']), 0.0)
 
         # Balance checks
         for i in range(5):
@@ -563,3 +570,51 @@ class TestPriorityLayoutOptimizer:
         assert np.all(result['q_inj'] >= 20.0)
         assert np.all(result['q_inj'] <= 60.0)
 
+
+
+class TestEqualInjectorRateLayoutOptimizer:
+    """Tests for constrained optimizer with equal injector-rate target."""
+
+    def test_constrained_layout_respects_geometry_constraints(self):
+        injectors, _ = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+
+        result = optimize_layout_equal_injector_rate(
+            inj_xy=inj_xy,
+            P_inj=30e6,
+            q_total=126.8,
+            params=params,
+            outer_to_inner_radius_ratio=1.302,
+            min_ip_factor=0.3,
+            injector_rate_rtol=0.03,
+            n_trials=6000,
+            random_seed=13,
+        )
+
+        assert result['prod_xy'].shape == (5, 2)
+        center_xy = np.mean(inj_xy, axis=0)
+
+        # Center producer fixed at injector-ring center
+        assert np.allclose(result['prod_xy'][0], center_xy, atol=1e-10)
+
+        # Outer-ring radius ratio fixed
+        R_inj = np.mean(np.linalg.norm(inj_xy - center_xy, axis=1))
+        outer_r = np.linalg.norm(result['prod_xy'][1:] - center_xy, axis=1)
+        assert np.allclose(outer_r, 1.302 * R_inj, rtol=1e-10, atol=1e-10)
+
+        # Injector flows should be close to equal
+        assert float(result['injector_rate_rel_spread']) < 0.12
+
+        # Objective values are computed
+        assert np.isfinite(float(result['wellhead_pressure_variance']))
+        assert 'dmin_ip' in result and 'min_ip_distance' in result and 'min_ip_constraint_violation' in result
+        assert float(result['min_ip_distance']) >= float(result['dmin_ip'])
+        assert np.isclose(float(result['min_ip_constraint_violation']), 0.0)
