@@ -287,7 +287,7 @@ def main():
         params=params,
         outer_to_inner_radius_ratio=radius_ratio,
         min_outer_gap_deg=20.0,
-        min_ip_factor=0.3,
+        min_ip_factor=0.5,
         injector_rate_rtol=0.02,
         n_trials=30000,
         random_seed=42,
