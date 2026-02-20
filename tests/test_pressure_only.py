@@ -472,6 +472,9 @@ class TestProducerCoordinateOptimization:
         assert float(opt['R_prod']) > 300.0
         assert float(opt['variance_dP']) <= var_base + 1e-12
         assert float(opt['min_angle_deg_achieved']) >= 10.0
+        assert 'dmin_ip' in opt and 'min_ip_distance' in opt and 'min_ip_constraint_violation' in opt
+        assert float(opt['min_ip_distance']) >= float(opt['dmin_ip'])
+        assert np.isclose(float(opt['min_ip_constraint_violation']), 0.0)
 
         # Check mass-balance constraints are still met
         for i in range(5):
@@ -528,6 +531,9 @@ class TestPriorityLayoutOptimizer:
         assert np.max(gaps_deg) <= 100.0
         assert 'std_outer_r' in result
         assert 'min_ip_all' in result
+        assert 'dmin_ip' in result and 'min_ip_distance' in result and 'min_ip_constraint_violation' in result
+        assert float(result['min_ip_distance']) >= float(result['dmin_ip'])
+        assert np.isclose(float(result['min_ip_constraint_violation']), 0.0)
 
         # Balance checks
         for i in range(5):
@@ -587,6 +593,7 @@ class TestEqualInjectorRateLayoutOptimizer:
             q_total=126.8,
             params=params,
             outer_to_inner_radius_ratio=1.302,
+            min_ip_factor=0.3,
             injector_rate_rtol=0.03,
             n_trials=6000,
             random_seed=13,
@@ -608,3 +615,6 @@ class TestEqualInjectorRateLayoutOptimizer:
 
         # Objective values are computed
         assert np.isfinite(float(result['wellhead_pressure_variance']))
+        assert 'dmin_ip' in result and 'min_ip_distance' in result and 'min_ip_constraint_violation' in result
+        assert float(result['min_ip_distance']) >= float(result['dmin_ip'])
+        assert np.isclose(float(result['min_ip_constraint_violation']), 0.0)
