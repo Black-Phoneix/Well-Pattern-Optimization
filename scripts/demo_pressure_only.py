@@ -23,7 +23,7 @@ from models.pressure_only import (
     validate_total_mass_balance,
     validate_solution_variable_rate,
     solve_pressure_allocation,
-    optimize_producer_layout_priority,
+    optimize_layout_equal_injector_rate,
 )
 
 
@@ -240,7 +240,8 @@ def main():
 
     # Geometry parameters
     R_inj = 300.0   # Injector ring radius [m]
-    R_prod = 600.0  # Producer ring radius [m]
+    radius_ratio = 1.302
+    R_prod = radius_ratio * R_inj  # Producer ring radius [m], constrained by ratio
 
     params = {
         'mu': mu,
@@ -264,11 +265,12 @@ def main():
     print(f"\nGeometry:")
     print(f"  Injector radius: {R_inj:.1f} m")
     print(f"  Producer radius: {R_prod:.1f} m")
+    print(f"  Radius ratio R_prod/R_inj: {radius_ratio:.3f}")
 
     # =========================================================================
     # 2. Fix injectors, then optimize producer coordinates using superposition
     # =========================================================================
-    print("\n2. PRESSURE OPTIMIZER (Fixed injectors, optimize producers)")
+    print("\n2. PRESSURE OPTIMIZER (Constrained layout + objective)")
     print("-" * 70)
 
     injectors, _ = create_3inj_5prod_layout(
@@ -278,19 +280,15 @@ def main():
     )
     inj_xy = np.array([[w.x, w.y] for w in injectors])
 
-    opt = optimize_producer_layout_priority(
+    opt = optimize_layout_equal_injector_rate(
         inj_xy=inj_xy,
         P_inj=P_inj,
         q_total=q_total,
         params=params,
-        R_inj=R_inj,
-        outer_radius_bounds=(R_inj + 50.0, 1200.0),
-        center_radius_max=150.0,
+        outer_to_inner_radius_ratio=radius_ratio,
         min_outer_gap_deg=20.0,
-        lambda_r=1.0,
-        injector_flow_bounds=(20.0, 60.0),
-        n_trials=25000,
-        pressure_tolerance_ratio=0.05,
+        injector_rate_rtol=0.02,
+        n_trials=30000,
         random_seed=42,
     )
 
@@ -298,37 +296,36 @@ def main():
     producers = [Well(x, y, 'producer') for x, y in prod_xy]
 
     print(f"Created {len(injectors)} fixed injectors and optimized {len(producers)} producers")
-    print("Pressure-first objective (target <= 5%):")
-    print(f"  pressure uniformity ratio: {float(opt['pressure_uniformity_ratio'])*100:.3f}%")
-    print(f"  tolerance ratio:           {float(opt['pressure_tolerance_ratio'])*100:.3f}%")
-    print("Second-stage uniformity metrics:")
-    print(f"  min(inj-to-prod distance, all producers): {float(opt['min_ip_all']):.3f} m")
-    print(f"  min(inj-to-outer-prod distance):          {float(opt['min_ip_outer']):.3f} m")
-    print(f"  min(prod-to-prod distance):      {float(opt['min_pp']):.3f} m")
-    print(f"  outer angle-gap CV:              {float(opt['gap_cv_outer']):.4f}")
-    print(f"  std(outer radii):                {float(opt['std_outer_r']):.3f} m")
+    print("Applied constraints:")
+    print("  1) All injector mass flow rates should be equal")
+    print("  2) Center producer is fixed at injector-ring center")
+    print("  3) R_prod / R_inj = 1.302")
     center_xy = np.mean(inj_xy, axis=0)
     center_dist = np.linalg.norm(opt['center_xy'] - center_xy)
-    sorted_deg = np.sort(opt['outer_theta_deg'])
+    sorted_deg = np.sort(opt['outer_angles_deg'])
     gaps_deg = np.diff(np.concatenate([sorted_deg, [sorted_deg[0] + 360.0]]))
+    print("Objective:")
+    print("  Minimize producer wellhead-pressure variance")
+    print("Constraint quality:")
+    print(f"  Injector flow relative spread: {float(opt['injector_rate_rel_spread'])*100:.3f}%")
+    print(f"  Injector flow tolerance:       {float(opt['injector_rate_rtol'])*100:.3f}%")
+    print(f"  Constraint violation:          {float(opt['injector_rate_constraint_violation']):.4e}")
+    print(f"  Wellhead pressure variance:    {float(opt['wellhead_pressure_variance']):.4e} Pa²")
     print(f"  center producer distance to injector-ring center: {center_dist:.3f} m")
     print(f"  minimum outer angular gap: {np.min(gaps_deg):.3f}°")
     print("Outer producer polar coordinates (deg, m):")
-    for idx, (ang, rr) in enumerate(zip(opt['outer_theta_deg'], opt['outer_r']), start=1):
-        print(f"  Outer producer {idx}: angle={float(ang):.3f}°, radius={float(rr):.3f} m")
+    for idx, ang in enumerate(opt['outer_angles_deg'], start=1):
+        print(f"  Outer producer {idx}: angle={float(ang):.3f}°, radius={float(opt['R_prod']):.3f} m")
 
     q_prod_vec = opt['q_prod_vec']
     q_prod = float(np.mean(q_prod_vec))
 
-    if opt['injector_flow_bounds'] is not None:
-        print(f"Injector flow bounds [kg/s]: {tuple(opt['injector_flow_bounds'])}")
-
-    print("Optimized variable producer flow split [kg/s]:")
+    print("Optimized producer flow split [kg/s] (estimated):")
     for i, qi in enumerate(q_prod_vec):
         print(f"  Producer {i}: {float(qi):.4f}")
 
     print_well_layout(injectors, producers)
-    plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(np.max(opt['outer_r'])))
+    plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(opt['R_prod']))
 
     # =========================================================================
     # 3. Compute impedance matrix
@@ -416,7 +413,7 @@ def main():
     print(f"Boundary conditions:")
     print(f"  - Injector BHP (Dirichlet): {P_inj/1e6:.1f} MPa (fixed)")
     print(f"  - Producer rates (Neumann): variable, mean {np.mean(q_prod_vec):.2f} kg/s")
-    print("  - Injector mass flow rates are not fixed; solved from pressure/impedance coupling.")
+    print("  - Injector mass flow rates: constrained to be equal (within tolerance).")
     print(f"\nKey results:")
     print(f"  - Producer BHP range: {np.min(P_prod)/1e6:.4f} - {np.max(P_prod)/1e6:.4f} MPa")
     print(f"  - Pressure uniformity CV: {np.std(P_prod)/np.mean(P_prod)*100:.2f}%")

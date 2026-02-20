@@ -660,6 +660,125 @@ def optimize_producer_layout_priority(
     return best
 
 
+def optimize_layout_equal_injector_rate(
+    inj_xy: np.ndarray,
+    P_inj: float,
+    q_total: float,
+    params: dict,
+    outer_to_inner_radius_ratio: float = 1.302,
+    n_outer: int = 4,
+    n_trials: int = 12000,
+    min_outer_gap_deg: float = 10.0,
+    injector_rate_rtol: float = 0.02,
+    random_seed: int = 42,
+    wellbore_kwargs: dict | None = None,
+) -> Dict[str, np.ndarray]:
+    """Optimize producer layout under fixed-geometry constraints.
+
+    Constraints enforced by construction:
+    - Center producer is fixed at the center of the injector inner ring.
+    - Outer producer ring radius satisfies ``R_prod / R_inj = outer_to_inner_radius_ratio``.
+
+    Additional hard/soft constraint:
+    - Injector mass flow rates should be equal (within ``injector_rate_rtol``).
+
+    Objective:
+    - Minimize variance of producer wellhead pressures, where wellhead pressure is
+      computed from producer BHP with ``producer_wellhead_pressures_from_bhp``
+      (which calls ``well_model.production_well_dynamics.dry_CO2_model``).
+    """
+    inj_xy = np.asarray(inj_xy, dtype=float)
+    if inj_xy.ndim != 2 or inj_xy.shape[1] != 2:
+        raise ValueError('inj_xy must have shape (n_inj, 2).')
+    if q_total <= 0.0:
+        raise ValueError('q_total must be positive.')
+    if outer_to_inner_radius_ratio <= 1.0:
+        raise ValueError('outer_to_inner_radius_ratio must be > 1.0.')
+    if n_outer < 2:
+        raise ValueError('n_outer must be at least 2.')
+
+    # Geometry constraints
+    center_xy = np.mean(inj_xy, axis=0)
+    R_inj = float(np.mean(np.linalg.norm(inj_xy - center_xy, axis=1)))
+    R_prod = outer_to_inner_radius_ratio * R_inj
+
+    rng = np.random.default_rng(random_seed)
+    if wellbore_kwargs is None:
+        wellbore_kwargs = {}
+
+    best = None
+    for _ in range(n_trials):
+        # Outer producer angles: start from quasi-uniform and add jitter.
+        base = rng.uniform(0.0, 2.0 * np.pi)
+        ideal = base + np.arange(n_outer) * (2.0 * np.pi / n_outer)
+        jitter = np.radians(rng.uniform(-12.0, 12.0, size=n_outer))
+        angles = np.mod(ideal + jitter, 2.0 * np.pi)
+        if _min_circular_separation_deg(angles) < min_outer_gap_deg:
+            continue
+
+        outer_xy = center_xy + np.column_stack((R_prod * np.cos(angles), R_prod * np.sin(angles)))
+        prod_xy = np.vstack([center_xy, outer_xy])
+
+        # Variable producer rates (estimated defaults around equal split).
+        alpha = np.full(n_outer + 1, 5.0)
+        q_prod_vec = q_total * rng.dirichlet(alpha=alpha)
+
+        Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
+        P_prod, q_ij, q_inj = solve_producer_bhp_variable_rate(P_inj, q_prod_vec, Z)
+
+        q_inj_target = float(np.mean(q_inj))
+        inj_rel_spread = float(np.max(np.abs(q_inj - q_inj_target)) / max(q_inj_target, 1e-12))
+        inj_constraint_violation = max(0.0, inj_rel_spread - injector_rate_rtol)
+
+        # Fast search metric: with shared-wellbore-loss approximation, minimizing
+        # BHP variance is equivalent to minimizing wellhead-pressure variance.
+        wh_var = float(np.var(P_prod))
+
+        candidate = {
+            'inj_xy': inj_xy,
+            'prod_xy': prod_xy,
+            'center_xy': center_xy,
+            'outer_angles_deg': np.array(np.degrees(angles)),
+            'R_inj': np.array(R_inj),
+            'R_prod': np.array(R_prod),
+            'radius_ratio': np.array(outer_to_inner_radius_ratio),
+            'q_prod_vec': q_prod_vec,
+            'P_prod': P_prod,
+            'q_ij': q_ij,
+            'q_inj': q_inj,
+            'injector_rate_rtol': np.array(injector_rate_rtol),
+            'injector_rate_rel_spread': np.array(inj_rel_spread),
+            'injector_rate_constraint_violation': np.array(inj_constraint_violation),
+            'wellhead_pressure_variance': np.array(wh_var),
+            'Z': Z,
+        }
+
+        if best is None:
+            best = candidate
+            continue
+
+        best_violation = float(best['injector_rate_constraint_violation'])
+        if inj_constraint_violation < best_violation - 1e-12:
+            best = candidate
+            continue
+        if inj_constraint_violation > best_violation + 1e-12:
+            continue
+
+        if wh_var < float(best['wellhead_pressure_variance']) - 1e-12:
+            best = candidate
+
+    # Convert selected BHP solution to wellhead pressures using the wellbore model.
+    if best is not None:
+        best['P_wh'] = producer_wellhead_pressures_from_bhp(
+            best['P_prod'],
+            best['q_prod_vec'],
+            **wellbore_kwargs,
+        )
+        best['wellhead_pressure_variance'] = np.array(float(np.var(best['P_wh'])))
+
+    return best
+
+
 def validate_solution(
     q_ij: np.ndarray,
     q_prod: float,
