@@ -29,6 +29,10 @@ from models.pressure_only import (
     solve_producer_bhp_variable_rate,
     optimize_producer_layout_priority,
     optimize_layout_equal_injector_rate,
+    cylinder_volume,
+    frustum_volume,
+    swept_volumes_3inj5prod,
+    producer_rates_from_volume,
 )
 from patterns.geometry import (
     Well,
@@ -572,6 +576,36 @@ class TestPriorityLayoutOptimizer:
 
 
 
+class TestThermalSweptVolumes:
+    """Tests for thermal swept-volume helper functions."""
+
+    def test_volume_helpers(self):
+        H = 300.0
+        Rin = 200.0
+        Rout = 500.0
+        Rtop = 3.275 * Rin
+
+        Vc = cylinder_volume(Rin, H)
+        Vfr = frustum_volume(Rout, Rtop, H)
+        vols = swept_volumes_3inj5prod(Rin, Rout, Rtop, H)
+
+        assert np.isclose(Vc, np.pi * Rin**2 * H)
+        assert np.isclose(Vfr, np.pi * H * (Rout**2 + Rout * Rtop + Rtop**2) / 3.0)
+        assert vols.shape == (5,)
+        assert np.isclose(vols[1], vols[2]) and np.isclose(vols[2], vols[3]) and np.isclose(vols[3], vols[4])
+        assert np.isclose(vols[0] + 4.0 * vols[1], Vfr)
+
+    def test_rate_allocation_from_volume(self):
+        volumes = np.array([2.0, 1.0, 1.0, 1.0, 1.0])
+        q = producer_rates_from_volume(60.0, volumes)
+        tau = volumes / q
+
+        assert np.isclose(np.sum(q), 60.0)
+        assert np.all(q > 0.0)
+        assert np.allclose(tau, tau[0])
+
+
+
 class TestEqualInjectorRateLayoutOptimizer:
     """Tests for constrained optimizer with equal injector-rate target."""
 
@@ -592,7 +626,7 @@ class TestEqualInjectorRateLayoutOptimizer:
             P_inj=30e6,
             q_total=126.8,
             params=params,
-            outer_to_inner_radius_ratio=1.302,
+            outer_to_inner_radius_ratio=2.30,
             min_ip_factor=0.3,
             injector_rate_rtol=0.03,
             n_trials=6000,
@@ -605,16 +639,20 @@ class TestEqualInjectorRateLayoutOptimizer:
         # Center producer fixed at injector-ring center
         assert np.allclose(result['prod_xy'][0], center_xy, atol=1e-10)
 
-        # Outer-ring radius ratio fixed
-        R_inj = np.mean(np.linalg.norm(inj_xy - center_xy, axis=1))
+        # Outer producers lie on optimized R_out ring and respect thermal ratio bounds
         outer_r = np.linalg.norm(result['prod_xy'][1:] - center_xy, axis=1)
-        assert np.allclose(outer_r, 1.302 * R_inj, rtol=1e-10, atol=1e-10)
+        assert np.allclose(outer_r, float(result['R_out']), rtol=1e-10, atol=1e-10)
+        ratio = float(result['radius_ratio'])
+        assert 2.137 <= ratio <= 2.71
 
         # Injector flows should be close to equal
         assert float(result['injector_rate_rel_spread']) < 0.12
 
-        # Objective values are computed
+        # Objective values and thermal outputs are computed
         assert np.isfinite(float(result['wellhead_pressure_variance']))
+        assert result['swept_volumes'].shape == (5,)
+        assert np.isclose(np.sum(result['q_prod_vec']), 126.8, rtol=1e-10)
+        assert np.isclose(float(result['breakthrough_time_cv']), 0.0, atol=1e-10)
         assert 'dmin_ip' in result and 'min_ip_distance' in result and 'min_ip_constraint_violation' in result
         assert float(result['min_ip_distance']) >= float(result['dmin_ip'])
         assert np.isclose(float(result['min_ip_constraint_violation']), 0.0)
