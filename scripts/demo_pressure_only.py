@@ -240,8 +240,8 @@ def main():
 
     # Geometry parameters
     R_inj = 300.0   # Injector ring radius [m]
-    radius_ratio = 1.302
-    R_prod = radius_ratio * R_inj  # Producer ring radius [m], constrained by ratio
+    radius_ratio_guess = 2.30
+    R_prod = radius_ratio_guess * R_inj  # Initial producer ring radius guess [m]
 
     params = {
         'mu': mu,
@@ -261,11 +261,12 @@ def main():
     print(f"\nOperating Conditions:")
     print(f"  Injector BHP:   {P_inj/1e6:.1f} MPa")
     print(f"  Total production rate target: {q_total:.1f} kg/s")
-    print(f"  Producer rate (equal split):  {q_prod:.3f} kg/s per producer")
+    print(f"  Producer rate target (equal split):  {q_prod:.3f} kg/s per producer")
     print(f"\nGeometry:")
     print(f"  Injector radius: {R_inj:.1f} m")
-    print(f"  Producer radius: {R_prod:.1f} m")
-    print(f"  Radius ratio R_prod/R_inj: {radius_ratio:.3f}")
+    print(f"  Producer radius (initial guess): {R_prod:.1f} m")
+    print(f"  Radius ratio guess R_prod/R_inj: {radius_ratio_guess:.3f}")
+    print("  Thermal sweep ratio bounds Rout/Rinj: [2.137, 2.710]")
 
     # =========================================================================
     # 2. Fix injectors, then optimize producer coordinates using superposition
@@ -285,7 +286,7 @@ def main():
         P_inj=P_inj,
         q_total=q_total,
         params=params,
-        outer_to_inner_radius_ratio=radius_ratio,
+        outer_to_inner_radius_ratio=radius_ratio_guess,
         min_outer_gap_deg=20.0,
         min_ip_factor=0.5,
         injector_rate_rtol=0.02,
@@ -300,7 +301,9 @@ def main():
     print("Applied constraints:")
     print("  1) All injector mass flow rates should be equal")
     print("  2) Center producer is fixed at injector-ring center")
-    print("  3) R_prod / R_inj = 1.302")
+    print("  3) Thermal constraint: 2.137 <= R_out / R_inj <= 2.71")
+    print("  4) Thermal cap radius relation: R_top = 3.275 * R_inj")
+    print("     with center thermal sweep fixed to injector ring: R_in = R_inj")
     center_xy = np.mean(inj_xy, axis=0)
     center_dist = np.linalg.norm(opt['center_xy'] - center_xy)
     sorted_deg = np.sort(opt['outer_angles_deg'])
@@ -316,17 +319,29 @@ def main():
     print(f"  minimum outer angular gap: {np.min(gaps_deg):.3f}°")
     print("Outer producer polar coordinates (deg, m):")
     for idx, ang in enumerate(opt['outer_angles_deg'], start=1):
-        print(f"  Outer producer {idx}: angle={float(ang):.3f}°, radius={float(opt['R_prod']):.3f} m")
+        print(f"  Outer producer {idx}: angle={float(ang):.3f}°, radius={float(opt['R_out']):.3f} m")
+
+    print("Thermal swept-volume allocation:")
+    print(f"  Central swept volume Vc:         {float(opt['central_swept_volume']):.4e} m³")
+    print(f"  Outer swept volume per well Vo:  {float(opt['outer_swept_volume_each']):.4e} m³")
+    print(f"  R_inj={float(opt['R_inj']):.3f} m, R_in={float(opt['R_in']):.3f} m")
+    print(f"  R_out={float(opt['R_out']):.3f} m, R_top={float(opt['R_top']):.3f} m")
+    print(f"  R_out/R_inj={float(opt['radius_ratio']):.4f}")
 
     q_prod_vec = opt['q_prod_vec']
     q_prod = float(np.mean(q_prod_vec))
 
-    print("Optimized producer flow split [kg/s] (estimated):")
+    print("Producer flow allocation [kg/s] (equal-rate model):")
     for i, qi in enumerate(q_prod_vec):
         print(f"  Producer {i}: {float(qi):.4f}")
 
+    print("Breakthrough time proxy τ_i = V_i / q_i [s]:")
+    for i, tau in enumerate(opt['breakthrough_time_proxy']):
+        print(f"  Producer {i}: {float(tau):.4e}")
+    print(f"  Breakthrough-time CV: {float(opt['breakthrough_time_cv']):.4e}")
+
     print_well_layout(injectors, producers)
-    plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(opt['R_prod']))
+    plot_well_layout(injectors, producers, R_inj=R_inj, R_prod=float(opt['R_out']))
 
     # =========================================================================
     # 3. Compute impedance matrix
@@ -402,7 +417,7 @@ def main():
 
     print("Using solve_pressure_allocation() convenience function (equal-rate reference)...")
     print(f"  Returned keys: {list(result.keys())}")
-    print("  Note: reference API enforces equal producer rates; optimizer uses variable producer rates.")
+    print("  Note: both reference API and optimizer use equal producer rates in this model.")
 
     # =========================================================================
     # 7. Summary
@@ -413,7 +428,7 @@ def main():
     print(f"Configuration: {len(injectors)} injectors, {len(producers)} producers")
     print(f"Boundary conditions:")
     print(f"  - Injector BHP (Dirichlet): {P_inj/1e6:.1f} MPa (fixed)")
-    print(f"  - Producer rates (Neumann): variable, mean {np.mean(q_prod_vec):.2f} kg/s")
+    print(f"  - Producer rates (Neumann): equal at q_i = Q_total/5 = {np.mean(q_prod_vec):.2f} kg/s")
     print("  - Injector mass flow rates: constrained to be equal (within tolerance).")
     print(f"\nKey results:")
     print(f"  - Producer BHP range: {np.min(P_prod)/1e6:.4f} - {np.max(P_prod)/1e6:.4f} MPa")
