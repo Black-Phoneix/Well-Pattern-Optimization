@@ -732,20 +732,24 @@ def optimize_layout_equal_injector_rate(
     outer_ratio_bounds: Tuple[float, float] = (2.137, 2.71),
     r_top_factor: float = 3.275,
 ) -> Dict[str, np.ndarray]:
-    """Optimize a 3-injector/5-producer layout under equal producer-rate assumptions.
+    """Optimize a 3-injector/5-producer layout under equal-rate thermal assumptions.
 
     Search variables:
-    - central producer sweep radius ``R_in``
-    - outer ring ratio ``R_out / R_in`` within ``outer_ratio_bounds``
+    - outer ring ratio ``R_out / R_inj`` within ``outer_ratio_bounds``
     - outer producer angles
 
-    Fixed physics constraints:
-    - ``R_top = r_top_factor * R_in``
+    Fixed geometry/physics constraints:
+    - ``R_in = R_inj`` (center thermal sweep radius equals injector-ring radius)
+    - ``R_top = r_top_factor * R_inj``
     - all producer rates are equal: ``q_i = q_total / 5``
 
     Objective hierarchy:
     1) Keep injector rates within ``injector_rate_rtol`` tolerance.
     2) Among feasible layouts, minimize producer wellhead-pressure variance.
+
+    Notes
+    -----
+    ``R_in_bounds`` is deprecated and ignored (``R_in`` is now fixed to ``R_inj``).
     """
     inj_xy = np.asarray(inj_xy, dtype=float)
     if inj_xy.ndim != 2 or inj_xy.shape[1] != 2:
@@ -759,9 +763,9 @@ def optimize_layout_equal_injector_rate(
     if not (0.0 < min_ip_factor < 1.0):
         raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
 
-    r_in_min, r_in_max = R_in_bounds
-    if r_in_min <= 0.0 or r_in_max <= r_in_min:
-        raise ValueError('R_in_bounds must satisfy 0 < min < max.')
+    # Deprecated compatibility argument: R_in is now fixed to injector-ring radius.
+    _ = R_in_bounds
+
     ratio_min, ratio_max = outer_ratio_bounds
     if ratio_min < 2.137 or ratio_max > 2.71 or ratio_max <= ratio_min:
         raise ValueError('outer_ratio_bounds must satisfy 2.137 <= min < max <= 2.71.')
@@ -769,6 +773,8 @@ def optimize_layout_equal_injector_rate(
     center_xy = np.mean(inj_xy, axis=0)
     R_inj = float(np.mean(np.linalg.norm(inj_xy - center_xy, axis=1)))
     dmin_ip = float(min_ip_factor * R_inj)
+    R_in = float(R_inj)
+    R_top = float(r_top_factor * R_in)
 
     rng = np.random.default_rng(random_seed)
     if wellbore_kwargs is None:
@@ -776,10 +782,8 @@ def optimize_layout_equal_injector_rate(
 
     best = None
     for _ in range(n_trials):
-        R_in = float(rng.uniform(r_in_min, r_in_max))
         radius_ratio = float(rng.uniform(ratio_min, ratio_max))
         R_out = float(radius_ratio * R_in)
-        R_top = float(r_top_factor * R_in)
 
         base = rng.uniform(0.0, 2.0 * np.pi)
         ideal = base + np.arange(n_outer) * (2.0 * np.pi / n_outer)

@@ -645,6 +645,10 @@ class TestEqualInjectorRateLayoutOptimizer:
         ratio = float(result['radius_ratio'])
         assert 2.137 <= ratio <= 2.71
 
+        # Thermal geometry consistency: R_in is fixed to injector-ring radius
+        assert np.isclose(float(result['R_in']), float(result['R_inj']), rtol=1e-12, atol=1e-12)
+        assert np.isclose(float(result['R_top']), 3.275 * float(result['R_inj']), rtol=1e-12, atol=1e-12)
+
         # Injector flows satisfy tolerance (feasible layout)
         assert float(result['injector_rate_constraint_violation']) <= 1e-12
         assert float(result['injector_rate_rel_spread']) <= float(result['injector_rate_rtol']) + 1e-12

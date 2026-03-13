@@ -266,7 +266,7 @@ def main():
     print(f"  Injector radius: {R_inj:.1f} m")
     print(f"  Producer radius (initial guess): {R_prod:.1f} m")
     print(f"  Radius ratio guess R_prod/R_inj: {radius_ratio_guess:.3f}")
-    print("  Thermal sweep ratio bounds Rout/Rin: [2.137, 2.710]")
+    print("  Thermal sweep ratio bounds Rout/Rinj: [2.137, 2.710]")
 
     # =========================================================================
     # 2. Fix injectors, then optimize producer coordinates using superposition
@@ -301,9 +301,9 @@ def main():
     print("Applied constraints:")
     print("  1) All injector mass flow rates should be equal")
     print("  2) Center producer is fixed at injector-ring center")
-    print("  3) Thermal constraint: 2.137 <= R_out / R_in <= 2.71")
-    print("  4) Thermal cap radius relation: R_top = 3.275 * R_in")
-    print("     (from the equal-rate thermal breakthrough derivation)")
+    print("  3) Thermal constraint: 2.137 <= R_out / R_inj <= 2.71")
+    print("  4) Thermal cap radius relation: R_top = 3.275 * R_inj")
+    print("     with center thermal sweep fixed to injector ring: R_in = R_inj")
     center_xy = np.mean(inj_xy, axis=0)
     center_dist = np.linalg.norm(opt['center_xy'] - center_xy)
     sorted_deg = np.sort(opt['outer_angles_deg'])
@@ -324,8 +324,9 @@ def main():
     print("Thermal swept-volume allocation:")
     print(f"  Central swept volume Vc:         {float(opt['central_swept_volume']):.4e} m³")
     print(f"  Outer swept volume per well Vo:  {float(opt['outer_swept_volume_each']):.4e} m³")
-    print(f"  R_in={float(opt['R_in']):.3f} m, R_out={float(opt['R_out']):.3f} m, R_top={float(opt['R_top']):.3f} m")
-    print(f"  R_out/R_in={float(opt['radius_ratio']):.4f}")
+    print(f"  R_inj={float(opt['R_inj']):.3f} m, R_in={float(opt['R_in']):.3f} m")
+    print(f"  R_out={float(opt['R_out']):.3f} m, R_top={float(opt['R_top']):.3f} m")
+    print(f"  R_out/R_inj={float(opt['radius_ratio']):.4f}")
 
     q_prod_vec = opt['q_prod_vec']
     q_prod = float(np.mean(q_prod_vec))
