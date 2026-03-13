@@ -261,7 +261,7 @@ def main():
     print(f"\nOperating Conditions:")
     print(f"  Injector BHP:   {P_inj/1e6:.1f} MPa")
     print(f"  Total production rate target: {q_total:.1f} kg/s")
-    print(f"  Producer rate (equal split):  {q_prod:.3f} kg/s per producer")
+    print(f"  Producer rate target (equal split):  {q_prod:.3f} kg/s per producer")
     print(f"\nGeometry:")
     print(f"  Injector radius: {R_inj:.1f} m")
     print(f"  Producer radius (initial guess): {R_prod:.1f} m")
@@ -303,6 +303,7 @@ def main():
     print("  2) Center producer is fixed at injector-ring center")
     print("  3) Thermal constraint: 2.137 <= R_out / R_in <= 2.71")
     print("  4) Thermal cap radius relation: R_top = 3.275 * R_in")
+    print("     (from the equal-rate thermal breakthrough derivation)")
     center_xy = np.mean(inj_xy, axis=0)
     center_dist = np.linalg.norm(opt['center_xy'] - center_xy)
     sorted_deg = np.sort(opt['outer_angles_deg'])
@@ -329,7 +330,7 @@ def main():
     q_prod_vec = opt['q_prod_vec']
     q_prod = float(np.mean(q_prod_vec))
 
-    print("Producer flow split from swept volume [kg/s]:")
+    print("Producer flow allocation [kg/s] (equal-rate model):")
     for i, qi in enumerate(q_prod_vec):
         print(f"  Producer {i}: {float(qi):.4f}")
 
@@ -415,7 +416,7 @@ def main():
 
     print("Using solve_pressure_allocation() convenience function (equal-rate reference)...")
     print(f"  Returned keys: {list(result.keys())}")
-    print("  Note: reference API enforces equal producer rates; optimizer uses variable producer rates.")
+    print("  Note: both reference API and optimizer use equal producer rates in this model.")
 
     # =========================================================================
     # 7. Summary
@@ -426,7 +427,7 @@ def main():
     print(f"Configuration: {len(injectors)} injectors, {len(producers)} producers")
     print(f"Boundary conditions:")
     print(f"  - Injector BHP (Dirichlet): {P_inj/1e6:.1f} MPa (fixed)")
-    print(f"  - Producer rates (Neumann): volume-proportional, mean {np.mean(q_prod_vec):.2f} kg/s")
+    print(f"  - Producer rates (Neumann): equal at q_i = Q_total/5 = {np.mean(q_prod_vec):.2f} kg/s")
     print("  - Injector mass flow rates: constrained to be equal (within tolerance).")
     print(f"\nKey results:")
     print(f"  - Producer BHP range: {np.min(P_prod)/1e6:.4f} - {np.max(P_prod)/1e6:.4f} MPa")

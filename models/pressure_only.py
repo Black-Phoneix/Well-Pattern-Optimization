@@ -732,7 +732,7 @@ def optimize_layout_equal_injector_rate(
     outer_ratio_bounds: Tuple[float, float] = (2.137, 2.71),
     r_top_factor: float = 3.275,
 ) -> Dict[str, np.ndarray]:
-    """Optimize a 3-injector/5-producer layout with thermal swept-volume flow split.
+    """Optimize a 3-injector/5-producer layout under equal producer-rate assumptions.
 
     Search variables:
     - central producer sweep radius ``R_in``
@@ -741,10 +741,11 @@ def optimize_layout_equal_injector_rate(
 
     Fixed physics constraints:
     - ``R_top = r_top_factor * R_in``
-    - producer rates are allocated as ``q_i ∝ V_i`` so that ``V_i / q_i`` is constant
-      (simultaneous thermal breakthrough proxy)
+    - all producer rates are equal: ``q_i = q_total / 5``
 
-    Hydraulic solver is unchanged and still drives the objective.
+    Objective hierarchy:
+    1) Keep injector rates within ``injector_rate_rtol`` tolerance.
+    2) Among feasible layouts, minimize producer wellhead-pressure variance.
     """
     inj_xy = np.asarray(inj_xy, dtype=float)
     if inj_xy.ndim != 2 or inj_xy.shape[1] != 2:
@@ -754,7 +755,7 @@ def optimize_layout_equal_injector_rate(
     if q_total <= 0.0:
         raise ValueError('q_total must be positive.')
     if n_outer != 4:
-        raise ValueError('This thermal swept-volume configuration requires n_outer=4.')
+        raise ValueError('This equal-rate thermal configuration requires n_outer=4.')
     if not (0.0 < min_ip_factor < 1.0):
         raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
 
@@ -795,11 +796,19 @@ def optimize_layout_equal_injector_rate(
         if min_ip_distance < dmin_ip:
             continue
 
-        volumes = swept_volumes_3inj5prod(R_in, R_out, R_top, float(params['b']))
-        q_prod_vec = producer_rates_from_volume(q_total, volumes)
+        q_prod = q_total / 5.0
+        q_prod_vec = np.full(5, q_prod, dtype=float)
 
         Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
-        P_prod, q_ij, q_inj = solve_producer_bhp_variable_rate(P_inj, q_prod_vec, Z)
+        P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
+
+        height = float(params['b'])
+        Vc = cylinder_volume(R_in, height)
+        Vouter_total = frustum_volume(R_in, R_top, height) - Vc
+        if Vouter_total <= 0.0:
+            continue
+        Vo = Vouter_total / 4.0
+        volumes = np.array([Vc, Vo, Vo, Vo, Vo], dtype=float)
 
         q_inj_target = float(np.mean(q_inj))
         inj_rel_spread = float(np.max(np.abs(q_inj - q_inj_target)) / max(q_inj_target, 1e-12))
@@ -822,6 +831,7 @@ def optimize_layout_equal_injector_rate(
             'R_top': np.array(R_top),
             'radius_ratio': np.array(radius_ratio),
             'outer_ratio_bounds': np.array(outer_ratio_bounds),
+            'q_prod': np.array(q_prod),
             'q_prod_vec': q_prod_vec,
             'swept_volumes': volumes,
             'central_swept_volume': np.array(volumes[0]),
@@ -845,23 +855,27 @@ def optimize_layout_equal_injector_rate(
             best = candidate
             continue
 
-        best_violation = float(best['injector_rate_constraint_violation'])
-        if inj_constraint_violation < best_violation - 1e-12:
-            best = candidate
+        if inj_constraint_violation > 0.0:
             continue
-        if inj_constraint_violation > best_violation + 1e-12:
+
+        if float(best['injector_rate_constraint_violation']) > 0.0:
+            best = candidate
             continue
 
         if wh_var < float(best['wellhead_pressure_variance']) - 1e-12:
             best = candidate
 
-    if best is not None:
-        best['P_wh'] = producer_wellhead_pressures_from_bhp(
-            best['P_prod'],
-            best['q_prod_vec'],
-            **wellbore_kwargs,
-        )
-        best['wellhead_pressure_variance'] = np.array(float(np.var(best['P_wh'])))
+    if best is None:
+        return None
+    if float(best['injector_rate_constraint_violation']) > 0.0:
+        return None
+
+    best['P_wh'] = producer_wellhead_pressures_from_bhp(
+        best['P_prod'],
+        best['q_prod_vec'],
+        **wellbore_kwargs,
+    )
+    best['wellhead_pressure_variance'] = np.array(float(np.var(best['P_wh'])))
 
     return best
 
