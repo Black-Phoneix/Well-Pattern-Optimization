@@ -1,5 +1,5 @@
 """
-Unit tests for the steady-state hydraulic allocation model with thermal proxy.
+Unit tests for the pressure-only allocation model.
 
 Tests the models/pressure_only.py module for:
 1. Impedance computation
@@ -32,13 +32,7 @@ from models.pressure_only import (
     cylinder_volume,
     frustum_volume,
     swept_volumes_3inj5prod,
-    swept_volumes_equal_partition_3inj5prod,
     producer_rates_from_volume,
-    thermal_depletion_curve,
-    producer_temperature_proxy,
-    lifetime_from_temperature_threshold,
-    field_thermal_metrics,
-    run_layout_comparison_study,
 )
 from patterns.geometry import (
     Well,
@@ -472,8 +466,8 @@ class TestProducerCoordinateOptimization:
             R_inj=300.0,
             R_prod_bounds=(350.0, 1200.0),
             n_outer=4,
-            n_radius_samples=8,
-            n_angle_trials=120,
+            n_radius_samples=20,
+            n_angle_trials=800,
             min_angle_deg=10.0,
             random_seed=7,
         )
@@ -517,7 +511,7 @@ class TestPriorityLayoutOptimizer:
             center_radius_max=150.0,
             min_outer_gap_deg=20.0,
             lambda_r=1.0,
-            n_trials=800,
+            n_trials=3000,
             pressure_tolerance_ratio=0.05,
             random_seed=11,
         )
@@ -572,7 +566,7 @@ class TestPriorityLayoutOptimizer:
             min_outer_gap_deg=20.0,
             lambda_r=1.0,
             injector_flow_bounds=(20.0, 60.0),
-            n_trials=800,
+            n_trials=2500,
             pressure_tolerance_ratio=0.05,
             random_seed=9,
         )
@@ -585,24 +579,21 @@ class TestPriorityLayoutOptimizer:
 class TestThermalSweptVolumes:
     """Tests for thermal swept-volume helper functions."""
 
-    def test_volume_helpers_follow_equal_partition_semantics(self):
+    def test_volume_helpers(self):
         H = 300.0
         Rin = 200.0
         Rout = 500.0
         Rtop = 3.275 * Rin
 
         Vc = cylinder_volume(Rin, H)
-        Vfr = frustum_volume(Rin, Rtop, H)
-        vols = swept_volumes_equal_partition_3inj5prod(Rin, Rtop, H)
-        vols_compat = swept_volumes_3inj5prod(Rin, Rout, Rtop, H)
+        Vfr = frustum_volume(Rout, Rtop, H)
+        vols = swept_volumes_3inj5prod(Rin, Rout, Rtop, H)
 
         assert np.isclose(Vc, np.pi * Rin**2 * H)
-        assert np.isclose(Vfr, np.pi * H * (Rin**2 + Rin * Rtop + Rtop**2) / 3.0)
+        assert np.isclose(Vfr, np.pi * H * (Rout**2 + Rout * Rtop + Rtop**2) / 3.0)
         assert vols.shape == (5,)
-        np.testing.assert_allclose(vols, vols_compat)
         assert np.isclose(vols[1], vols[2]) and np.isclose(vols[2], vols[3]) and np.isclose(vols[3], vols[4])
         assert np.isclose(vols[0] + 4.0 * vols[1], Vfr)
-        assert np.isclose(vols[0], Vc)
 
     def test_rate_allocation_from_volume(self):
         volumes = np.array([2.0, 1.0, 1.0, 1.0, 1.0])
@@ -612,39 +603,6 @@ class TestThermalSweptVolumes:
         assert np.isclose(np.sum(q), 60.0)
         assert np.all(q > 0.0)
         assert np.allclose(tau, tau[0])
-
-    def test_lightweight_thermal_lifetime_outputs_are_sensible(self):
-        volumes = np.array([8.0, 4.0, 4.0, 4.0, 4.0]) * 1e7
-        q_prod_vec = np.full(5, 25.0)
-
-        depletion = thermal_depletion_curve(volumes, q_prod_vec, n_time_steps=120, max_time_factor=1.5)
-        T_matrix = producer_temperature_proxy(depletion['G_matrix'], T_reservoir=360.0, T_inj=300.0)
-        lifetime = lifetime_from_temperature_threshold(
-            depletion['time_years'],
-            T_matrix,
-            threshold_fraction=0.6,
-            T_reservoir=360.0,
-            T_inj=300.0,
-        )
-        metrics = field_thermal_metrics(
-            swept_volumes=volumes,
-            q_prod_vec=q_prod_vec,
-            n_time_steps=120,
-            max_time_factor=1.5,
-            threshold_fraction=0.6,
-            T_reservoir=360.0,
-            T_inj=300.0,
-        )
-
-        assert depletion['G_matrix'].shape == (120, 5)
-        assert np.all(np.isfinite(depletion['G_matrix']))
-        assert np.allclose(depletion['G_matrix'][0], 1.0)
-        assert np.all(T_matrix <= 360.0 + 1e-12)
-        assert np.all(T_matrix >= 300.0 - 1e-12)
-        assert np.all(np.isfinite(lifetime))
-        assert np.all(lifetime > 0.0)
-        assert np.isfinite(float(metrics['mean_lifetime_years']))
-        assert 0.0 < float(metrics['time_averaged_thermal_availability']) <= 1.0
 
 
 
@@ -670,9 +628,8 @@ class TestEqualInjectorRateLayoutOptimizer:
             params=params,
             outer_to_inner_radius_ratio=2.30,
             min_ip_factor=0.3,
-            min_pp_factor=0.8,
             injector_rate_rtol=0.03,
-            n_trials=1200,
+            n_trials=6000,
             random_seed=13,
         )
 
@@ -704,98 +661,5 @@ class TestEqualInjectorRateLayoutOptimizer:
         assert np.isclose(float(result['q_prod']), 126.8 / 5.0, rtol=1e-12, atol=1e-12)
         assert np.isfinite(float(result['breakthrough_time_cv']))
         assert 'dmin_ip' in result and 'min_ip_distance' in result and 'min_ip_constraint_violation' in result
-        assert 'dmin_pp' in result and 'min_pp_distance' in result and 'min_pp_constraint_violation' in result
-        assert 'min_outer_gap_deg_achieved' in result
         assert float(result['min_ip_distance']) >= float(result['dmin_ip'])
-        assert float(result['min_pp_distance']) >= float(result['dmin_pp'])
         assert np.isclose(float(result['min_ip_constraint_violation']), 0.0)
-        assert np.isclose(float(result['min_pp_constraint_violation']), 0.0)
-        assert result['time_years'].ndim == 1
-        assert result['G_matrix'].shape[1] == 5
-        assert result['T_matrix'].shape[1] == 5
-        assert result['lifetime_years_per_producer'].shape == (5,)
-        assert np.isfinite(float(result['mean_lifetime_years']))
-        assert 0.0 < float(result['time_averaged_thermal_availability']) <= 1.0
-
-    def test_explicit_producer_spacing_constraint_is_enforced(self):
-        injectors, _ = generate_center_ring_pattern(
-            n_inj=3,
-            n_prod_outer=4,
-            R_inj=300.0,
-            R_prod=600.0,
-            phi_inj0=0.0,
-            phi_prod0=np.pi / 4,
-        )
-        inj_xy = np.array([[w.x, w.y] for w in injectors])
-        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
-
-        feasible = optimize_layout_equal_injector_rate(
-            inj_xy=inj_xy,
-            P_inj=30e6,
-            q_total=126.8,
-            params=params,
-            min_ip_factor=0.3,
-            min_pp_distance=420.0,
-            injector_rate_rtol=0.03,
-            n_trials=1000,
-            random_seed=5,
-        )
-
-        infeasible = optimize_layout_equal_injector_rate(
-            inj_xy=inj_xy,
-            P_inj=30e6,
-            q_total=126.8,
-            params=params,
-            min_ip_factor=0.3,
-            min_pp_distance=950.0,
-            injector_rate_rtol=0.03,
-            n_trials=600,
-            random_seed=5,
-        )
-
-        assert feasible is not None
-        assert float(feasible['min_pp_distance']) >= 420.0
-        assert infeasible is None
-
-    def test_parametric_study_returns_structured_records(self):
-        injectors, _ = generate_center_ring_pattern(
-            n_inj=3,
-            n_prod_outer=4,
-            R_inj=300.0,
-            R_prod=600.0,
-            phi_inj0=0.0,
-            phi_prod0=np.pi / 4,
-        )
-        inj_xy = np.array([[w.x, w.y] for w in injectors])
-        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
-
-        records = run_layout_comparison_study(
-            base_case={
-                'inj_xy': inj_xy,
-                'P_inj': 30e6,
-                'q_total': 126.8,
-                'params': params,
-                'min_ip_factor': 0.3,
-                'min_pp_factor': 0.8,
-                'injector_rate_rtol': 0.03,
-                'n_trials': 800,
-                'random_seed': 4,
-            },
-            case_overrides=[
-                {'label': 'geom_case', 'outer_ratio_bounds': (2.2, 2.4)},
-                {'label': 'perm_case', 'params': {'k': 7e-14}},
-                {'label': 'rate_case', 'q_total': 140.0},
-            ],
-        )
-
-        assert len(records) == 3
-        for record in records:
-            assert record['label'] in {'geom_case', 'perm_case', 'rate_case'}
-            assert record['feasible'] is True
-            assert np.isfinite(record['pressure_variance_Pa2'])
-            assert np.isfinite(record['injector_rate_rel_spread'])
-            assert np.isfinite(record['min_ip_distance_m'])
-            assert np.isfinite(record['min_pp_distance_m'])
-            assert np.isfinite(record['breakthrough_time_cv'])
-            assert np.isfinite(record['mean_lifetime_years'])
-            assert 0.0 < record['time_averaged_thermal_availability'] <= 1.0
