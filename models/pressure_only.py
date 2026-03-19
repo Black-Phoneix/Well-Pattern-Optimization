@@ -1,27 +1,15 @@
 """
-Steady-state hydraulic model with thermal design proxy and lightweight lifetime module.
+Pressure-only allocation model for CPG well-field optimization.
 
-This thesis-oriented module combines:
-- a steady-state linear Darcy-style impedance model for 3-injector / 5-producer layouts,
-- hydraulic layout optimization under spacing constraints,
-- an equal-volume thermal design proxy, and
-- a lightweight analytical thermal-depletion / lifetime model.
+This module implements a steady-state, linear Darcy-style pressure/impedance model
+for computing producer bottom-hole pressures and flow allocation in a system with:
+- Fixed injector pressure (Dirichlet boundary condition)
+- Fixed producer mass flow rate (Neumann boundary condition)
 
-Important geometry semantics for this thesis version
-----------------------------------------------------
-- ``R_inj``: hydraulic injector-ring radius.
-- ``R_in``: center thermal control radius, fixed equal to ``R_inj``.
-- ``R_out``: hydraulic placement radius for the four outer producers.
-- ``R_top``: outer thermal-domain radius used only for thermal control-volume partitioning.
+No thermal effects are considered. This is a pressure-only model.
 
-The key modeling decision is that ``R_out`` affects pressure, impedance, spacing,
-and flow allocation, but it does *not* define the thermal swept volume.
-Thermal control volumes are defined by:
-- one center cylinder of radius ``R_in = R_inj``, and
-- four equal partitions of the thermal domain between ``R_in`` and ``R_top``.
-
-Unit conventions
-----------------
+Unit Conventions:
+-----------------
 - Pressure: Pa
 - Mass flow rate: kg/s
 - Distance: m
@@ -30,11 +18,9 @@ Unit conventions
 - Density: kg/m^3
 - Reservoir thickness: m
 - Well radius: m
-- Volume: m^3
-- Time: s unless otherwise noted
 """
 
-from typing import Dict, Tuple, Union, List, Sequence
+from typing import Dict, Tuple, Union, List
 import numpy as np
 
 # Import existing modules for reuse
@@ -425,7 +411,7 @@ def optimize_outer_producer_ring(
             Z = compute_pairwise_impedance(inj_xy, prod_xy, params)
             P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
             q_prod_vec = np.full(P_prod.shape, q_prod, dtype=float)
-            var_dp = float(np.var(P_prod))
+            var_dp = wellhead_pressure_variance(P_prod, q_prod_vec)
 
             if best is None or var_dp < best['variance_dP']:
                 best = {
@@ -444,10 +430,6 @@ def optimize_outer_producer_ring(
                     'min_ip_constraint_violation': np.array(max(0.0, dmin_ip - min_ip_distance)),
                 }
 
-    if best is not None:
-        q_prod_vec_best = np.full(best['P_prod'].shape, q_prod, dtype=float)
-        best['P_wh'] = producer_wellhead_pressures_from_bhp(best['P_prod'], q_prod_vec_best)
-        best['variance_dP'] = np.array(float(np.var(best['P_wh'])))
     return best
 
 
@@ -514,34 +496,15 @@ def frustum_volume(r_bottom: float, r_top: float, height: float) -> float:
     return float(np.pi * height * (r_bottom**2 + r_bottom * r_top + r_top**2) / 3.0)
 
 
-def swept_volumes_equal_partition_3inj5prod(R_in: float, R_top: float, height: float) -> np.ndarray:
-    """Return equal-partition thermal control volumes for the 3-injector / 5-producer thesis layout.
-
-    The thermal semantics are:
-    - center producer: cylindrical control volume of radius ``R_in = R_inj``
-    - four outer producers: equal partition of the external thermal domain between
-      ``R_in`` and ``R_top``
-
-    ``R_out`` is intentionally absent because it is a hydraulic placement radius,
-    not a thermal swept-volume radius, in this thesis version.
-    """
-    Vc = cylinder_volume(R_in, height)
-    Vthermal_total = frustum_volume(R_in, R_top, height)
-    Vouter_total = Vthermal_total - Vc
+def swept_volumes_3inj5prod(Rin: float, Rout: float, Rtop: float, height: float) -> np.ndarray:
+    """Compute [Vc, Vo, Vo, Vo, Vo] swept volumes for 1-center/4-outer producers."""
+    Vc = cylinder_volume(Rin, height)
+    Vfr = frustum_volume(Rout, Rtop, height)
+    Vouter_total = Vfr - Vc
     if Vouter_total <= 0.0:
-        raise ValueError('Outer swept volume must be positive. Check R_in/R_top values.')
+        raise ValueError('Outer swept volume must be positive. Check Rin/Rout/Rtop values.')
     Vo = Vouter_total / 4.0
     return np.array([Vc, Vo, Vo, Vo, Vo], dtype=float)
-
-
-def swept_volumes_3inj5prod(Rin: float, Rout: float, Rtop: float, height: float) -> np.ndarray:
-    """Backward-compatible wrapper for thesis equal-partition thermal control volumes.
-
-    ``Rout`` is accepted for compatibility with earlier callers but is ignored on
-    purpose because hydraulic placement radius does not define thermal volume here.
-    """
-    _ = Rout
-    return swept_volumes_equal_partition_3inj5prod(Rin, Rtop, height)
 
 
 def producer_rates_from_volume(q_total: float, volumes: np.ndarray) -> np.ndarray:
@@ -552,145 +515,6 @@ def producer_rates_from_volume(q_total: float, volumes: np.ndarray) -> np.ndarra
     if np.any(volumes <= 0.0):
         raise ValueError('volumes must contain only positive values.')
     return q_total * volumes / np.sum(volumes)
-
-
-def thermal_depletion_curve(
-    swept_volumes: Sequence[float],
-    q_prod_vec: Sequence[float],
-    n_time_steps: int = 240,
-    max_time_factor: float = 2.0,
-    floor: float = 0.0,
-) -> Dict[str, np.ndarray]:
-    """Compute a normalized thermal-availability decline curve for each producer.
-
-    The model uses the breakthrough proxy ``tau_i = V_i / q_i`` and a simple,
-    deterministic post-breakthrough exponential decline:
-
-    ``G_i(t) = 1`` for ``t <= tau_i``
-    ``G_i(t) = exp(-(t - tau_i) / tau_i)`` for ``t > tau_i``
-
-    This is a lightweight equivalent-thermal-capacity model rather than a PDE solve.
-    """
-    swept_volumes = np.asarray(swept_volumes, dtype=float)
-    q_prod_vec = np.asarray(q_prod_vec, dtype=float)
-    if swept_volumes.shape != q_prod_vec.shape:
-        raise ValueError('swept_volumes and q_prod_vec must have the same shape.')
-    if np.any(swept_volumes <= 0.0):
-        raise ValueError('swept_volumes must be positive.')
-    if np.any(q_prod_vec <= 0.0):
-        raise ValueError('q_prod_vec must be positive.')
-    if n_time_steps < 3:
-        raise ValueError('n_time_steps must be at least 3.')
-    if max_time_factor <= 0.0:
-        raise ValueError('max_time_factor must be positive.')
-
-    tau_seconds = swept_volumes / q_prod_vec
-    t_end = float(max_time_factor * np.max(tau_seconds))
-    time_seconds = np.linspace(0.0, t_end, n_time_steps)
-
-    tau_safe = np.maximum(tau_seconds, 1e-30)
-    time_minus_tau = time_seconds[:, None] - tau_safe[None, :]
-    G_matrix = np.where(
-        time_minus_tau <= 0.0,
-        1.0,
-        np.exp(-time_minus_tau / tau_safe[None, :]),
-    )
-    if floor > 0.0:
-        G_matrix = np.maximum(G_matrix, floor)
-
-    return {
-        'time_seconds': time_seconds,
-        'time_years': time_seconds / (365.25 * 24.0 * 3600.0),
-        'G_matrix': G_matrix,
-        'tau_seconds': tau_seconds,
-        'tau_years': tau_seconds / (365.25 * 24.0 * 3600.0),
-    }
-
-
-def producer_temperature_proxy(
-    G_matrix: np.ndarray,
-    T_reservoir: float,
-    T_inj: float,
-) -> np.ndarray:
-    """Map normalized thermal availability to a simple outlet-temperature proxy."""
-    G_matrix = np.asarray(G_matrix, dtype=float)
-    if T_reservoir <= T_inj:
-        raise ValueError('T_reservoir must be greater than T_inj.')
-    return T_inj + G_matrix * (T_reservoir - T_inj)
-
-
-def lifetime_from_temperature_threshold(
-    time_years: Sequence[float],
-    T_matrix: np.ndarray,
-    threshold_fraction: float = 0.5,
-    T_reservoir: float = 343.15,
-    T_inj: float = 303.15,
-) -> np.ndarray:
-    """Return first time each producer temperature falls below a threshold fraction."""
-    time_years = np.asarray(time_years, dtype=float)
-    T_matrix = np.asarray(T_matrix, dtype=float)
-    if T_matrix.shape[0] != time_years.shape[0]:
-        raise ValueError('T_matrix first dimension must match time_years length.')
-    if not (0.0 < threshold_fraction <= 1.0):
-        raise ValueError('threshold_fraction must be in (0, 1].')
-    threshold_temperature = T_inj + threshold_fraction * (T_reservoir - T_inj)
-    below = T_matrix <= threshold_temperature
-    lifetimes = np.empty(T_matrix.shape[1], dtype=float)
-    for j in range(T_matrix.shape[1]):
-        if np.any(below[:, j]):
-            lifetimes[j] = float(time_years[np.argmax(below[:, j])])
-        else:
-            lifetimes[j] = float(time_years[-1])
-    return lifetimes
-
-
-def field_thermal_metrics(
-    swept_volumes: Sequence[float],
-    q_prod_vec: Sequence[float],
-    n_time_steps: int = 240,
-    max_time_factor: float = 2.0,
-    threshold_fraction: float = 0.5,
-    T_reservoir: float = 343.15,
-    T_inj: float = 303.15,
-) -> Dict[str, np.ndarray]:
-    """Compute producer-level and field-level thermal availability / lifetime metrics."""
-    depletion = thermal_depletion_curve(
-        swept_volumes=swept_volumes,
-        q_prod_vec=q_prod_vec,
-        n_time_steps=n_time_steps,
-        max_time_factor=max_time_factor,
-    )
-    T_matrix = producer_temperature_proxy(
-        depletion['G_matrix'],
-        T_reservoir=T_reservoir,
-        T_inj=T_inj,
-    )
-    q_prod_vec = np.asarray(q_prod_vec, dtype=float)
-    weights = q_prod_vec / np.sum(q_prod_vec)
-    field_G = depletion['G_matrix'] @ weights
-    lifetime_years = lifetime_from_temperature_threshold(
-        depletion['time_years'],
-        T_matrix,
-        threshold_fraction=threshold_fraction,
-        T_reservoir=T_reservoir,
-        T_inj=T_inj,
-    )
-    field_temperature = T_matrix @ weights
-    time_averaged_G = np.trapz(field_G, depletion['time_years']) / max(depletion['time_years'][-1], 1e-30)
-
-    return {
-        **depletion,
-        'T_matrix': T_matrix,
-        'field_G': field_G,
-        'field_temperature_proxy': field_temperature,
-        'lifetime_years_per_producer': lifetime_years,
-        'mean_lifetime_years': np.array(float(np.mean(lifetime_years))),
-        'min_lifetime_years': np.array(float(np.min(lifetime_years))),
-        'time_averaged_thermal_availability': np.array(float(time_averaged_G)),
-        'threshold_fraction': np.array(threshold_fraction),
-        'T_reservoir': np.array(T_reservoir),
-        'T_inj': np.array(T_inj),
-    }
 
 
 def optimize_producer_layout_priority(
@@ -795,7 +619,9 @@ def optimize_producer_layout_priority(
             if np.any(q_inj < qinj_min) or np.any(q_inj > qinj_max):
                 continue
 
-        pressure_ratio = _pressure_uniformity_ratio(P_prod)
+        pressure_ratio = _pressure_uniformity_ratio(
+            producer_wellhead_pressures_from_bhp(P_prod, q_prod_vec)
+        )
         pressure_violation = max(0.0, pressure_ratio - pressure_tolerance_ratio)
 
         # uniformity terms
@@ -899,21 +725,14 @@ def optimize_layout_equal_injector_rate(
     n_trials: int = 12000,
     min_outer_gap_deg: float = 10.0,
     min_ip_factor: float = 0.6,
-    min_pp_factor: float = 0.8,
-    min_pp_distance: float | None = None,
     injector_rate_rtol: float = 0.02,
     random_seed: int = 42,
     wellbore_kwargs: dict | None = None,
     R_in_bounds: Tuple[float, float] = (120.0, 260.0),
     outer_ratio_bounds: Tuple[float, float] = (2.137, 2.71),
     r_top_factor: float = 3.275,
-    thermal_time_steps: int = 240,
-    thermal_time_factor: float = 2.0,
-    lifetime_threshold_fraction: float = 0.5,
-    T_reservoir: float = 343.15,
-    T_inj: float = 303.15,
 ) -> Dict[str, np.ndarray]:
-    """Optimize a 3-injector / 5-producer layout under hydraulic and thermal-proxy assumptions.
+    """Optimize a 3-injector/5-producer layout under equal-rate thermal assumptions.
 
     Search variables:
     - outer ring ratio ``R_out / R_inj`` within ``outer_ratio_bounds``
@@ -926,9 +745,7 @@ def optimize_layout_equal_injector_rate(
 
     Objective hierarchy:
     1) Keep injector rates within ``injector_rate_rtol`` tolerance.
-    2) Satisfy injector-producer and producer-producer spacing constraints.
-    3) Among feasible layouts, minimize producer wellhead-pressure variance.
-    4) Break ties using larger spacing and more regular outer angular gaps.
+    2) Among feasible layouts, minimize producer wellhead-pressure variance.
 
     Notes
     -----
@@ -945,11 +762,6 @@ def optimize_layout_equal_injector_rate(
         raise ValueError('This equal-rate thermal configuration requires n_outer=4.')
     if not (0.0 < min_ip_factor < 1.0):
         raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
-    if min_pp_distance is None:
-        if min_pp_factor <= 0.0:
-            raise ValueError('min_pp_factor must be positive when min_pp_distance is not provided.')
-    elif min_pp_distance <= 0.0:
-        raise ValueError('min_pp_distance must be positive.')
 
     # Deprecated compatibility argument: R_in is now fixed to injector-ring radius.
     _ = R_in_bounds
@@ -961,7 +773,6 @@ def optimize_layout_equal_injector_rate(
     center_xy = np.mean(inj_xy, axis=0)
     R_inj = float(np.mean(np.linalg.norm(inj_xy - center_xy, axis=1)))
     dmin_ip = float(min_ip_factor * R_inj)
-    dmin_pp = float(min_pp_distance if min_pp_distance is not None else min_pp_factor * R_inj)
     R_in = float(R_inj)
     R_top = float(r_top_factor * R_in)
 
@@ -988,11 +799,6 @@ def optimize_layout_equal_injector_rate(
         min_ip_distance = float(np.min(d_ip))
         if min_ip_distance < dmin_ip:
             continue
-        d_pp = np.linalg.norm(prod_xy[:, None, :] - prod_xy[None, :, :], axis=2)
-        d_pp = d_pp + np.eye(prod_xy.shape[0]) * 1e9
-        min_pp_distance_achieved = float(np.min(d_pp))
-        if min_pp_distance_achieved < dmin_pp:
-            continue
 
         q_prod = q_total / 5.0
         q_prod_vec = np.full(5, q_prod, dtype=float)
@@ -1001,23 +807,23 @@ def optimize_layout_equal_injector_rate(
         P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
 
         height = float(params['b'])
-        volumes = swept_volumes_equal_partition_3inj5prod(R_in, R_top, height)
+        Vc = cylinder_volume(R_in, height)
+        Vouter_total = frustum_volume(R_in, R_top, height) - Vc
+        if Vouter_total <= 0.0:
+            continue
+        Vo = Vouter_total / 4.0
+        volumes = np.array([Vc, Vo, Vo, Vo, Vo], dtype=float)
 
         q_inj_target = float(np.mean(q_inj))
         inj_rel_spread = float(np.max(np.abs(q_inj - q_inj_target)) / max(q_inj_target, 1e-12))
         inj_constraint_violation = max(0.0, inj_rel_spread - injector_rate_rtol)
 
-        outer_gap_deg_achieved = float(_min_circular_separation_deg(angles))
-        min_ip_violation = max(0.0, dmin_ip - min_ip_distance)
-        min_pp_violation = max(0.0, dmin_pp - min_pp_distance_achieved)
-
-        # Fast search metric: the shared-offset wellbore approximation preserves the
-        # ranking for equal producer rates, so we use BHP variance inside the search
-        # loop and compute the final wellhead-pressure proxy only for the best layout.
+        # Fast search metric: shared-wellbore-loss approximation preserves ranking.
         wh_var = float(np.var(P_prod))
 
         tau = volumes / np.maximum(q_prod_vec, 1e-30)
         tau_cv = float(np.std(tau) / np.mean(tau))
+
         candidate = {
             'inj_xy': inj_xy,
             'prod_xy': prod_xy,
@@ -1043,12 +849,8 @@ def optimize_layout_equal_injector_rate(
             'injector_rate_rel_spread': np.array(inj_rel_spread),
             'injector_rate_constraint_violation': np.array(inj_constraint_violation),
             'dmin_ip': np.array(dmin_ip),
-            'dmin_pp': np.array(dmin_pp),
             'min_ip_distance': np.array(min_ip_distance),
-            'min_pp_distance': np.array(min_pp_distance_achieved),
-            'min_ip_constraint_violation': np.array(min_ip_violation),
-            'min_pp_constraint_violation': np.array(min_pp_violation),
-            'min_outer_gap_deg_achieved': np.array(outer_gap_deg_achieved),
+            'min_ip_constraint_violation': np.array(max(0.0, dmin_ip - min_ip_distance)),
             'wellhead_pressure_variance': np.array(wh_var),
             'Z': Z,
         }
@@ -1057,45 +859,19 @@ def optimize_layout_equal_injector_rate(
             best = candidate
             continue
 
-        candidate_flags = (
-            inj_constraint_violation <= 1e-12,
-            (min_ip_violation <= 1e-12 and min_pp_violation <= 1e-12),
-        )
-        best_flags = (
-            float(best['injector_rate_constraint_violation']) <= 1e-12,
-            (
-                float(best['min_ip_constraint_violation']) <= 1e-12
-                and float(best['min_pp_constraint_violation']) <= 1e-12
-            ),
-        )
-        if candidate_flags > best_flags:
-            best = candidate
+        if inj_constraint_violation > 0.0:
             continue
-        if candidate_flags < best_flags:
+
+        if float(best['injector_rate_constraint_violation']) > 0.0:
+            best = candidate
             continue
 
         if wh_var < float(best['wellhead_pressure_variance']) - 1e-12:
-            best = candidate
-            continue
-        if wh_var > float(best['wellhead_pressure_variance']) + 1e-12:
-            continue
-
-        candidate_spacing_score = (min_ip_distance + min_pp_distance_achieved, outer_gap_deg_achieved)
-        best_spacing_score = (
-            float(best['min_ip_distance']) + float(best['min_pp_distance']),
-            float(best['min_outer_gap_deg_achieved']),
-        )
-        if candidate_spacing_score > best_spacing_score:
             best = candidate
 
     if best is None:
         return None
     if float(best['injector_rate_constraint_violation']) > 0.0:
-        return None
-    if (
-        float(best['min_ip_constraint_violation']) > 0.0
-        or float(best['min_pp_constraint_violation']) > 0.0
-    ):
         return None
 
     best['P_wh'] = producer_wellhead_pressures_from_bhp(
@@ -1104,77 +880,8 @@ def optimize_layout_equal_injector_rate(
         **wellbore_kwargs,
     )
     best['wellhead_pressure_variance'] = np.array(float(np.var(best['P_wh'])))
-    best.update(field_thermal_metrics(
-        swept_volumes=best['swept_volumes'],
-        q_prod_vec=best['q_prod_vec'],
-        n_time_steps=thermal_time_steps,
-        max_time_factor=thermal_time_factor,
-        threshold_fraction=lifetime_threshold_fraction,
-        T_reservoir=T_reservoir,
-        T_inj=T_inj,
-    ))
 
     return best
-
-
-def run_layout_comparison_study(
-    base_case: Dict[str, object],
-    case_overrides: Sequence[Dict[str, object]],
-) -> List[Dict[str, float]]:
-    """Run a lightweight parametric comparison study for thesis tables/figures.
-
-    Parameters
-    ----------
-    base_case : dict
-        Keyword arguments for ``optimize_layout_equal_injector_rate`` plus
-        required ``inj_xy``, ``P_inj``, ``q_total``, and ``params``.
-    case_overrides : sequence of dict
-        Per-case updates. Nested ``params`` dictionaries are merged.
-
-    Returns
-    -------
-    list[dict]
-        Structured result records with input settings and key hydraulic /
-        thermal metrics.
-    """
-    records: List[Dict[str, float]] = []
-    for idx, override in enumerate(case_overrides):
-        case = dict(base_case)
-        override = dict(override)
-        params = dict(case.get('params', {}))
-        params.update(override.pop('params', {}))
-        case['params'] = params
-        label = override.pop('label', f'case_{idx}')
-        case.update(override)
-
-        result = optimize_layout_equal_injector_rate(**case)
-        if result is None:
-            records.append({
-                'label': label,
-                'feasible': False,
-            })
-            continue
-
-        records.append({
-            'label': label,
-            'feasible': True,
-            'R_inj': float(result['R_inj']),
-            'R_out': float(result['R_out']),
-            'R_top': float(result['R_top']),
-            'radius_ratio': float(result['radius_ratio']),
-            'permeability_m2': float(params['k']),
-            'q_total_kg_s': float(case['q_total']),
-            'P_inj_Pa': float(case['P_inj']),
-            'pressure_variance_Pa2': float(result['wellhead_pressure_variance']),
-            'injector_rate_rel_spread': float(result['injector_rate_rel_spread']),
-            'min_ip_distance_m': float(result['min_ip_distance']),
-            'min_pp_distance_m': float(result['min_pp_distance']),
-            'breakthrough_time_cv': float(result['breakthrough_time_cv']),
-            'mean_lifetime_years': float(result['mean_lifetime_years']),
-            'time_averaged_thermal_availability': float(result['time_averaged_thermal_availability']),
-            'min_outer_gap_deg_achieved': float(result['min_outer_gap_deg_achieved']),
-        })
-    return records
 
 
 def validate_solution(
@@ -1340,7 +1047,7 @@ def solve_pressure_allocation(
     validate: bool = True
 ) -> dict:
     """
-    High-level API to solve the steady-state hydraulic allocation problem.
+    High-level API to solve the pressure-only allocation problem.
 
     This is a convenience function that combines impedance computation,
     pressure solution, and validation into a single call.
