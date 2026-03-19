@@ -497,9 +497,14 @@ def frustum_volume(r_bottom: float, r_top: float, height: float) -> float:
 
 
 def swept_volumes_3inj5prod(Rin: float, Rout: float, Rtop: float, height: float) -> np.ndarray:
-    """Compute [Vc, Vo, Vo, Vo, Vo] swept volumes for 1-center/4-outer producers."""
+    """Compute thesis-consistent [Vc, Vo, Vo, Vo, Vo] swept volumes.
+
+    ``Rin`` defines the center thermal control radius and ``Rtop`` defines the
+    outer thermal-domain radius. ``Rout`` is retained for compatibility but is
+    not used in this thermal-volume calculation.
+    """
     Vc = cylinder_volume(Rin, height)
-    Vfr = frustum_volume(Rout, Rtop, height)
+    Vfr = frustum_volume(Rin, Rtop, height)
     Vouter_total = Vfr - Vc
     if Vouter_total <= 0.0:
         raise ValueError('Outer swept volume must be positive. Check Rin/Rout/Rtop values.')
@@ -725,6 +730,7 @@ def optimize_layout_equal_injector_rate(
     n_trials: int = 12000,
     min_outer_gap_deg: float = 10.0,
     min_ip_factor: float = 0.6,
+    min_pp_factor: float = 0.85,
     injector_rate_rtol: float = 0.02,
     random_seed: int = 42,
     wellbore_kwargs: dict | None = None,
@@ -762,6 +768,8 @@ def optimize_layout_equal_injector_rate(
         raise ValueError('This equal-rate thermal configuration requires n_outer=4.')
     if not (0.0 < min_ip_factor < 1.0):
         raise ValueError('min_ip_factor must satisfy 0 < min_ip_factor < 1.')
+    if not (0.0 < min_pp_factor < 1.0):
+        raise ValueError('min_pp_factor must satisfy 0 < min_pp_factor < 1.')
 
     # Deprecated compatibility argument: R_in is now fixed to injector-ring radius.
     _ = R_in_bounds
@@ -773,6 +781,7 @@ def optimize_layout_equal_injector_rate(
     center_xy = np.mean(inj_xy, axis=0)
     R_inj = float(np.mean(np.linalg.norm(inj_xy - center_xy, axis=1)))
     dmin_ip = float(min_ip_factor * R_inj)
+    dmin_pp = float(min_pp_factor * R_inj)
     R_in = float(R_inj)
     R_top = float(r_top_factor * R_in)
 
@@ -800,6 +809,12 @@ def optimize_layout_equal_injector_rate(
         if min_ip_distance < dmin_ip:
             continue
 
+        d_pp = np.linalg.norm(prod_xy[:, None, :] - prod_xy[None, :, :], axis=2)
+        np.fill_diagonal(d_pp, np.inf)
+        min_pp_distance = float(np.min(d_pp))
+        if min_pp_distance < dmin_pp:
+            continue
+
         q_prod = q_total / 5.0
         q_prod_vec = np.full(5, q_prod, dtype=float)
 
@@ -807,12 +822,7 @@ def optimize_layout_equal_injector_rate(
         P_prod, q_ij, q_inj = solve_producer_bhp_equal_rate(P_inj, q_prod, Z)
 
         height = float(params['b'])
-        Vc = cylinder_volume(R_in, height)
-        Vouter_total = frustum_volume(R_in, R_top, height) - Vc
-        if Vouter_total <= 0.0:
-            continue
-        Vo = Vouter_total / 4.0
-        volumes = np.array([Vc, Vo, Vo, Vo, Vo], dtype=float)
+        volumes = swept_volumes_3inj5prod(R_in, R_out, R_top, height)
 
         q_inj_target = float(np.mean(q_inj))
         inj_rel_spread = float(np.max(np.abs(q_inj - q_inj_target)) / max(q_inj_target, 1e-12))
@@ -851,6 +861,9 @@ def optimize_layout_equal_injector_rate(
             'dmin_ip': np.array(dmin_ip),
             'min_ip_distance': np.array(min_ip_distance),
             'min_ip_constraint_violation': np.array(max(0.0, dmin_ip - min_ip_distance)),
+            'dmin_pp': np.array(dmin_pp),
+            'min_pp_distance': np.array(min_pp_distance),
+            'min_pp_constraint_violation': np.array(max(0.0, dmin_pp - min_pp_distance)),
             'wellhead_pressure_variance': np.array(wh_var),
             'Z': Z,
         }
