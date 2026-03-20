@@ -586,11 +586,11 @@ class TestThermalSweptVolumes:
         Rtop = 3.275 * Rin
 
         Vc = cylinder_volume(Rin, H)
-        Vfr = frustum_volume(Rout, Rtop, H)
+        Vfr = frustum_volume(Rin, Rtop, H)
         vols = swept_volumes_3inj5prod(Rin, Rout, Rtop, H)
 
         assert np.isclose(Vc, np.pi * Rin**2 * H)
-        assert np.isclose(Vfr, np.pi * H * (Rout**2 + Rout * Rtop + Rtop**2) / 3.0)
+        assert np.isclose(Vfr, np.pi * H * (Rin**2 + Rin * Rtop + Rtop**2) / 3.0)
         assert vols.shape == (5,)
         assert np.isclose(vols[1], vols[2]) and np.isclose(vols[2], vols[3]) and np.isclose(vols[3], vols[4])
         assert np.isclose(vols[0] + 4.0 * vols[1], Vfr)
@@ -608,6 +608,36 @@ class TestThermalSweptVolumes:
 
 class TestEqualInjectorRateLayoutOptimizer:
     """Tests for constrained optimizer with equal injector-rate target."""
+
+    def test_constrained_layout_reports_producer_spacing_constraint(self):
+        injectors, _ = generate_center_ring_pattern(
+            n_inj=3,
+            n_prod_outer=4,
+            R_inj=300.0,
+            R_prod=600.0,
+            phi_inj0=0.0,
+            phi_prod0=np.pi / 4,
+        )
+        inj_xy = np.array([[w.x, w.y] for w in injectors])
+        params = {'mu': 5e-5, 'rho': 800.0, 'k': 5e-14, 'b': 300.0, 'rw': 0.1}
+
+        result = optimize_layout_equal_injector_rate(
+            inj_xy=inj_xy,
+            P_inj=30e6,
+            q_total=126.8,
+            params=params,
+            min_ip_factor=0.3,
+            min_pp_factor=0.85,
+            injector_rate_rtol=0.03,
+            n_trials=6000,
+            random_seed=13,
+        )
+
+        assert 'dmin_pp' in result
+        assert 'min_pp_distance' in result
+        assert 'min_pp_constraint_violation' in result
+        assert float(result['min_pp_distance']) >= float(result['dmin_pp'])
+        assert np.isclose(float(result['min_pp_constraint_violation']), 0.0)
 
     def test_constrained_layout_respects_geometry_constraints(self):
         injectors, _ = generate_center_ring_pattern(
