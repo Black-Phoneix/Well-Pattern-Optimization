@@ -18,6 +18,7 @@ from optimizers.pattern_optimization import optimize_3inj5prod_layout, build_3in
 
 
 OUT_CSV = Path(__file__).resolve().parent / "sensitivity_results.csv"
+SUMMARY_CSV = Path(__file__).resolve().parent / "sensitivity_summary.csv"
 
 
 def evaluate_case(inj_xy, prod_xy, pressure_params, thermal_props, t_inj_k, q_total):
@@ -94,10 +95,25 @@ def main() -> None:
                     "value": val,
                     "objective": res["objective"],
                     "P_avg_w": m["P_avg_w"],
+                    "P_avg_norm": m["P_avg_norm"],
                     "cv_prod_rates": m["cv_prod_rates"],
                     "cv_inj_rates": m["cv_inj_rates"],
+                    "mean_pressure_drop_pa": m["mean_pressure_drop_pa"],
                     "max_pressure_drop_pa": m["max_pressure_drop_pa"],
+                    "max_pressure_drop_norm": m["max_pressure_drop_norm"],
+                    "pressure_penalty": m["pressure_penalty"],
+                    "spacing_penalty": m["spacing_penalty"],
+                    "thermal_penalty": m["thermal_penalty"],
+                    "constraint_penalty": m["constraint_penalty"],
+                    "objective_thermal_term": m["objective_components"]["thermal_term"],
+                    "objective_balance_term": m["objective_components"]["balance_term"],
+                    "objective_pressure_term": m["objective_components"]["pressure_term"],
+                    "objective_penalty_term": m["objective_components"]["constraint_penalty_term"],
                     "breakthrough_mean_years": float(np.mean(res["thermal"]["breakthrough_time_proxy_years"])),
+                    "breakthrough_min_years": m["breakthrough_min_years"],
+                    "breakthrough_max_years": m["breakthrough_max_years"],
+                    "reservoir_reference_temperature_k": m["reservoir_reference_temperature_k"],
+                    "depth_is_active_in_current_model": m["depth_is_active_in_current_model"],
                     "min_ip_spacing_m": m["min_ip_spacing_m"],
                     "min_pp_spacing_m": m["min_pp_spacing_m"],
                 })
@@ -108,14 +124,54 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-    # simple ranked sensitivity by objective range
+    # ranked sensitivities by objective and underlying metrics
     print(f"Saved: {OUT_CSV}")
+    summary_rows = []
     for layout in ["base", "optimized"]:
         subset = [r for r in rows if r["layout"] == layout]
-        print(f"\nMost sensitive parameters ({layout}):")
+        print(f"\nSensitivity summary ({layout}):")
         for p in perturbations:
-            vals = [r["objective"] for r in subset if r["parameter"] == p]
-            print(f"  {p:<8} objective range = {max(vals)-min(vals):.4f}")
+            one = [r for r in subset if r["parameter"] == p]
+            objective_range = max(r["objective"] for r in one) - min(r["objective"] for r in one)
+            thermal_range = max(r["P_avg_w"] for r in one) - min(r["P_avg_w"] for r in one)
+            pressure_range = max(r["max_pressure_drop_pa"] for r in one) - min(r["max_pressure_drop_pa"] for r in one)
+            flow_balance_range = max(r["cv_prod_rates"] for r in one) - min(r["cv_prod_rates"] for r in one)
+            hyd_affects = pressure_range > 1e-9
+            th_affects = thermal_range > 1e-9
+            obj_affects = objective_range > 1e-9
+
+            if p == "depth":
+                classification = "currently inactive / not connected"
+            elif hyd_affects and th_affects:
+                classification = "affects hydraulic + thermal"
+            elif hyd_affects:
+                classification = "affects hydraulic only"
+            elif th_affects:
+                classification = "affects thermal only"
+            else:
+                classification = "currently inactive / not connected"
+
+            if (hyd_affects or th_affects) and not obj_affects:
+                classification += " (WARNING: affects physics but not objective)"
+            print(
+                f"  {p:<8} objective range={objective_range:.6f}, "
+                f"thermal range={thermal_range:.3e}, pressure range={pressure_range:.3e} -> {classification}"
+            )
+            summary_rows.append({
+                "layout": layout,
+                "parameter": p,
+                "objective_range": objective_range,
+                "P_avg_w_range": thermal_range,
+                "max_pressure_drop_pa_range": pressure_range,
+                "cv_prod_rates_range": flow_balance_range,
+                "classification": classification,
+            })
+
+    with SUMMARY_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    print(f"Saved: {SUMMARY_CSV}")
 
 
 if __name__ == "__main__":

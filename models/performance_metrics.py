@@ -55,18 +55,24 @@ def spacing_metrics(inj_xy: np.ndarray, prod_xy: np.ndarray) -> Dict[str, float]
 def default_objective_builder(
     w_power: float = 1.0,
     w_flow_cv: float = 0.2,
+    w_pressure: float = 0.15,
     w_penalty: float = 10.0,
 ) -> Callable[[Dict[str, float]], float]:
-    """Build scalar objective from normalized power, flow CV, and penalties.
+    """Build scalar objective from thermal, balance, pressure, and penalties.
 
     Objective is minimized:
-        J = -w_power * P_avg_norm + w_flow_cv * CV_prod + w_penalty * penalty
+        J = thermal_term + balance_term + pressure_term + penalty_term
+          = -w_power * P_avg_norm
+            + w_flow_cv * CV_prod
+            + w_pressure * max_pressure_drop_norm
+            + w_penalty * penalty
     """
 
     def _objective(m: Dict[str, float]) -> float:
         return (
             -w_power * m["P_avg_norm"]
             + w_flow_cv * m["cv_prod_rates"]
+            + w_pressure * m["max_pressure_drop_norm"]
             + w_penalty * m["constraint_penalty"]
         )
 
@@ -90,6 +96,7 @@ def evaluate_layout_performance(
     producer_radius_bounds_m: tuple[float, float] | None = None,
     objective_fn: Callable[[Dict[str, float]], float] | None = None,
     p_avg_reference_w: float | None = None,
+    depth_m: float | None = None,
 ) -> Dict[str, object]:
     """Evaluate coupled metrics and scalar objective for one candidate layout."""
     inj_xy = np.asarray(inj_xy, dtype=float)
@@ -121,27 +128,31 @@ def evaluate_layout_performance(
     p_drop = p_inj_pa - p_prod
     spacing = spacing_metrics(inj_xy, prod_xy)
 
-    penalty = 0.0
+    pressure_penalty = 0.0
+    spacing_penalty = 0.0
+    thermal_penalty = 0.0
     if pressure_drop_max_pa is not None:
-        penalty += max(0.0, float(np.max(p_drop) - pressure_drop_max_pa) / pressure_drop_max_pa)
+        pressure_penalty = max(0.0, float(np.max(p_drop) - pressure_drop_max_pa) / pressure_drop_max_pa)
     if spacing_min_ip_m is not None:
-        penalty += max(0.0, (spacing_min_ip_m - spacing["min_ip_spacing_m"]) / spacing_min_ip_m)
+        spacing_penalty += max(0.0, (spacing_min_ip_m - spacing["min_ip_spacing_m"]) / spacing_min_ip_m)
     if spacing_min_pp_m is not None:
-        penalty += max(0.0, (spacing_min_pp_m - spacing["min_pp_spacing_m"]) / spacing_min_pp_m)
+        spacing_penalty += max(0.0, (spacing_min_pp_m - spacing["min_pp_spacing_m"]) / spacing_min_pp_m)
     if producer_radius_bounds_m is not None:
         rmin, rmax = producer_radius_bounds_m
-        penalty += max(0.0, (rmin - spacing["min_prod_radius_m"]) / max(rmin, 1e-9))
-        penalty += max(0.0, (spacing["max_prod_radius_m"] - rmax) / max(rmax, 1e-9))
+        spacing_penalty += max(0.0, (rmin - spacing["min_prod_radius_m"]) / max(rmin, 1e-9))
+        spacing_penalty += max(0.0, (spacing["max_prod_radius_m"] - rmax) / max(rmax, 1e-9))
+    penalty = pressure_penalty + spacing_penalty + thermal_penalty
 
     p_avg = float(thermal["P_avg_w"])
-    # Normalize against an idealized undepleted upper bound:
-    # P_ref = q_total * c_co2 * (T0 - T_inj)
-    # This keeps P_avg_norm informative across sensitivity/optimization runs.
+    # Normalize against a reservoir-side reference scale independent of T_inj.
+    # Using a T_inj-dependent normalization masked true T_inj sensitivity in the objective.
+    # The reference here anchors to reservoir absolute temperature above 0°C.
     if p_avg_reference_w is None:
-        p_ref = max(q_total_kg_s * thermal_props.c_co2 * max(t0_k - t_inj_k, 0.0), 1.0)
+        p_ref = max(q_total_kg_s * thermal_props.c_co2 * max(t0_k - 273.15, 1.0), 1.0)
     else:
         p_ref = p_avg_reference_w
 
+    pressure_scale = float(pressure_drop_max_pa) if pressure_drop_max_pa is not None else max(float(p_inj_pa), 1.0)
     scalar_metrics = {
         "P_avg_w": p_avg,
         "P_avg_norm": p_avg / p_ref,
@@ -149,13 +160,30 @@ def evaluate_layout_performance(
         "cv_inj_rates": coefficient_of_variation(q_inj),
         "mean_pressure_drop_pa": float(np.mean(p_drop)),
         "max_pressure_drop_pa": float(np.max(p_drop)),
+        "max_pressure_drop_norm": float(np.max(p_drop)) / pressure_scale,
+        "pressure_penalty": float(pressure_penalty),
+        "spacing_penalty": float(spacing_penalty),
+        "thermal_penalty": float(thermal_penalty),
         "constraint_penalty": float(penalty),
+        "breakthrough_mean_years": float(np.mean(thermal["breakthrough_time_proxy_years"])),
+        "breakthrough_min_years": float(np.min(thermal["breakthrough_time_proxy_years"])),
+        "breakthrough_max_years": float(np.max(thermal["breakthrough_time_proxy_years"])),
+        "reservoir_reference_temperature_k": float(t0_k),
+        "depth_m": None if depth_m is None else float(depth_m),
+        "depth_is_active_in_current_model": False,
         **spacing,
     }
 
     if objective_fn is None:
         objective_fn = default_objective_builder()
     objective_value = float(objective_fn(scalar_metrics))
+    scalar_metrics["objective"] = objective_value
+    scalar_metrics["objective_components"] = {
+        "thermal_term": float(-scalar_metrics["P_avg_norm"]),
+        "balance_term": float(scalar_metrics["cv_prod_rates"]),
+        "pressure_term": float(scalar_metrics["max_pressure_drop_norm"]),
+        "constraint_penalty_term": float(scalar_metrics["constraint_penalty"]),
+    }
 
     return {
         "objective": objective_value,
