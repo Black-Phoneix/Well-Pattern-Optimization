@@ -93,12 +93,14 @@ def optimize_3inj5prod_layout(
     t_inj_k: float,
     t0_k: float,
     cfg: OptimizationConfig = OptimizationConfig(),
+    r_inj_bounds_m: tuple[float, float] = (120.0, 350.0),
+    r_prod_bounds_m: tuple[float, float] = (260.0, 900.0),
 ) -> Dict[str, object]:
     """Optimize low-dimensional 3 injector / 5 producer geometry."""
 
     bounds = [
-        (120.0, 350.0),   # r_inj
-        (260.0, 900.0),   # r_prod
+        r_inj_bounds_m,   # r_inj
+        r_prod_bounds_m,   # r_prod
         (0.0, 2.0 * np.pi),  # phi_inj0
         (0.0, 2.0 * np.pi),  # phi_prod0
         (-80.0, 80.0),    # center x
@@ -138,6 +140,84 @@ def optimize_3inj5prod_layout(
 
     x_best = result.x
     inj_xy, prod_xy = build_3inj5prod_layout(*x_best)
+    eval_best = evaluate_layout_performance(
+        inj_xy,
+        prod_xy,
+        pressure_params=pressure_params,
+        thermal_props=thermal_props,
+        p_inj_pa=p_inj_pa,
+        q_total_kg_s=q_total_kg_s,
+        t_inj_k=t_inj_k,
+        t0_k=t0_k,
+        pressure_drop_max_pa=8e6,
+        spacing_min_ip_m=0.6 * x_best[0],
+        spacing_min_pp_m=0.7 * x_best[0],
+        producer_radius_bounds_m=(0.0, 1200.0),
+    )
+
+    return {
+        "success": bool(result.success),
+        "message": str(result.message),
+        "nfev": int(result.nfev),
+        "nit": int(result.nit),
+        "x_best": x_best,
+        "objective_best": float(result.fun),
+        "evaluation": eval_best,
+    }
+
+
+def optimize_3inj5prod_layout_fixed_center(
+    pressure_params: dict,
+    thermal_props: ThermalMaterialProperties,
+    p_inj_pa: float,
+    q_total_kg_s: float,
+    t_inj_k: float,
+    t0_k: float,
+    cfg: OptimizationConfig = OptimizationConfig(),
+    r_inj_bounds_m: tuple[float, float] = (120.0, 350.0),
+    r_prod_bounds_m: tuple[float, float] = (260.0, 1200.0),
+) -> Dict[str, object]:
+    """Optimize layout with the center producer fixed at the geometric center."""
+    bounds = [
+        r_inj_bounds_m,   # r_inj
+        r_prod_bounds_m,  # r_prod
+        (0.0, 2.0 * np.pi),  # phi_inj0
+        (0.0, 2.0 * np.pi),  # phi_prod0
+    ]
+
+    def obj(x: np.ndarray) -> float:
+        r_inj, r_prod, phi_i, phi_p = x
+        if r_prod <= r_inj:
+            return 1e6 + (r_inj - r_prod) ** 2
+        inj_xy, prod_xy = build_3inj5prod_layout(r_inj, r_prod, phi_i, phi_p, 0.0, 0.0)
+        result = evaluate_layout_performance(
+            inj_xy,
+            prod_xy,
+            pressure_params=pressure_params,
+            thermal_props=thermal_props,
+            p_inj_pa=p_inj_pa,
+            q_total_kg_s=q_total_kg_s,
+            t_inj_k=t_inj_k,
+            t0_k=t0_k,
+            pressure_drop_max_pa=8e6,
+            spacing_min_ip_m=0.6 * r_inj,
+            spacing_min_pp_m=0.7 * r_inj,
+            producer_radius_bounds_m=(0.0, 1200.0),
+        )
+        return float(result["objective"])
+
+    result = differential_evolution(
+        obj,
+        bounds,
+        popsize=cfg.popsize,
+        maxiter=cfg.maxiter,
+        seed=cfg.seed,
+        polish=cfg.polish,
+        updating="deferred",
+    )
+
+    x_best = result.x
+    inj_xy, prod_xy = build_3inj5prod_layout(*x_best, 0.0, 0.0)
     eval_best = evaluate_layout_performance(
         inj_xy,
         prod_xy,
